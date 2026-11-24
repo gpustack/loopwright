@@ -21,8 +21,8 @@
   
   
   
-  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/latest/images/logo_hu_ef169d6c363295df.3b907f6ddb897e188ca8c4f5e172ccdde55f4d2c25ccc092666ccd2e59111856.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/latest/images/logo_hu_90b015dd418204d9.f7018fba3843b4b28ddbafa2b3cd566eb4bd2c3636a8667504765088a2795aca.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/latest/images/logo_hu_aebf313dad664680.8dfcd6a6909d121a4f4e9cf40b298600526e7e60b350f40eb0d9443367dc9c57.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/latest/images/logo_hu_26148784bb4e8d8b.20009204f8ce0c077de9b006b9be7537900b67ab2b44849722ca06e453bf5e17.png">
   
   <title>Managed Controller · Loopwright</title>
   
@@ -36,7 +36,7 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="topbar">
     
-    <a class="brand" href="/loopwright/latest/" aria-label="Loopwright home"><img src="/loopwright/latest/images/logo_hu_72b2e0d8fb22ffa2.7aa7cfbf568b33218252ff52c4e3788a7be1904dd5fe995594694f6baba85490.png" width="30" height="30" alt=""><span>Loopwright</span></a>
+    <a class="brand" href="/loopwright/latest/" aria-label="Loopwright home"><img src="/loopwright/latest/images/logo_hu_3ef7981c6e36e22.3a67bde1a9653790083e7482a4a417861ea9497865dd094c4e16ab87c63ec05b.png" width="30" height="30" alt=""><span>Loopwright</span></a>
     <nav class="top-links" aria-label="Main navigation">
       <a class="top-github-link" href="https://github.com/gpustack/loopwright" aria-label="GitHub repository">
         <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
@@ -236,6 +236,11 @@
       
     
   
+    
+    
+      
+    
+  
 
 
 <details class="nav-section" open>
@@ -255,6 +260,12 @@
           <a title="Managed Controller" href="/loopwright/latest/docs/walkthroughs/managed-controller/" aria-current="page">Managed Controller</a>
         
       
+        
+        
+          
+          <a title="Evolutionary Campaigns" href="/loopwright/latest/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+        
+      
     
   </div>
 </details>
@@ -268,6 +279,11 @@
 
 
 
+  
+    
+    
+      
+    
   
     
     
@@ -331,6 +347,12 @@
           <a title="Decision Routing" href="/loopwright/latest/docs/configuration/decision-routing/" >Decision Routing</a>
         
       
+        
+        
+          
+          <a title="Evolution Campaign" href="/loopwright/latest/docs/configuration/evolution-campaign/" >Evolution Campaign</a>
+        
+      
     
   </div>
 </details>
@@ -383,52 +405,52 @@
 -->
 <p>Managed controller mode coordinates an operator-owned authority store (<code>TrustedRegistry</code>) with a run configuration (<code>ControllerConfig</code> embedding <code>TaskContract</code>):</p>
 <table>
-  <thead>
-      <tr>
-          <th>Relationship</th>
-          <th>Source field</th>
-          <th>Target declaration</th>
-          <th>Runtime invariant</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td>Containment</td>
-          <td><code>ControllerConfig.spec.task</code></td>
-          <td>Embedded <code>TaskContract</code> (<code>apiVersion</code>, <code>kind</code>, <code>spec</code>)</td>
-          <td>JCS-hashed into run lock; carries zero credentials or handler digests</td>
-      </tr>
-      <tr>
-          <td>Registry hash lock</td>
-          <td><code>ControllerConfig.spec.registry.{name,digest}</code></td>
-          <td><code>TrustedRegistry.metadata.name</code> + file SHA-256</td>
-          <td>Must match <code>--registry-sha256</code> and live outside repo/config roots</td>
-      </tr>
-      <tr>
-          <td>Role binding</td>
-          <td><code>spec.profiles.roles[].{roleId,profileRef}</code></td>
-          <td>Bridges <code>TaskContract.roles[].id</code> to <code>roleProfiles[].id</code></td>
-          <td>Enforces provider, context ceiling, tool subset, and <code>runtimeRef</code></td>
-      </tr>
-      <tr>
-          <td>Step &amp; check binding</td>
-          <td><code>spec.profiles.steps[].{stepId,handlerRef}</code></td>
-          <td>Bridges <code>TaskContract.steps[].id</code> to <code>handlers[].id</code></td>
-          <td>Verifies installed handler SHA-256 and <code>acceptance.checks[].id</code></td>
-      </tr>
-      <tr>
-          <td>Context pinning</td>
-          <td><code>TaskContract.trustedContext.{revision,resources}</code></td>
-          <td><code>TrustedRegistry.{resourceVersion,resources[]}</code></td>
-          <td>Matches context revision and read-only instruction SHA-256 digests</td>
-      </tr>
-      <tr>
-          <td>Secret &amp; PR wiring</td>
-          <td><code>spec.credentials[]</code> &amp; <code>publication.endpointRef</code></td>
-          <td><code>credentialBindings[]</code>, <code>environmentBindings[]</code>, <code>publicationEndpoints[]</code></td>
-          <td>Resolves <code>${ENV}</code> in memory only; signs HMAC PR/gate requests</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Relationship</th>
+					<th>Source field</th>
+					<th>Target declaration</th>
+					<th>Runtime invariant</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td>Containment</td>
+					<td><code>ControllerConfig.spec.task</code></td>
+					<td>Embedded <code>TaskContract</code> (<code>apiVersion</code>, <code>kind</code>, <code>spec</code>)</td>
+					<td>JCS-hashed into run lock; carries zero credentials or handler digests</td>
+			</tr>
+			<tr>
+					<td>Registry hash lock</td>
+					<td><code>ControllerConfig.spec.registry.{name,digest}</code></td>
+					<td><code>TrustedRegistry.metadata.name</code> + file SHA-256</td>
+					<td>Must match <code>--registry-sha256</code> and live outside repo/config roots</td>
+			</tr>
+			<tr>
+					<td>Role binding</td>
+					<td><code>spec.profiles.roles[].{roleId,profileRef}</code></td>
+					<td>Bridges <code>TaskContract.roles[].id</code> to <code>roleProfiles[].id</code></td>
+					<td>Enforces provider, context ceiling, tool subset, and <code>runtimeRef</code></td>
+			</tr>
+			<tr>
+					<td>Step &amp; check binding</td>
+					<td><code>spec.profiles.steps[].{stepId,handlerRef}</code></td>
+					<td>Bridges <code>TaskContract.steps[].id</code> to <code>handlers[].id</code></td>
+					<td>Verifies installed handler SHA-256 and <code>acceptance.checks[].id</code></td>
+			</tr>
+			<tr>
+					<td>Context pinning</td>
+					<td><code>TaskContract.trustedContext.{revision,resources}</code></td>
+					<td><code>TrustedRegistry.{resourceVersion,resources[]}</code></td>
+					<td>Matches context revision and read-only instruction SHA-256 digests</td>
+			</tr>
+			<tr>
+					<td>Secret &amp; PR wiring</td>
+					<td><code>spec.credentials[]</code> &amp; <code>publication.endpointRef</code></td>
+					<td><code>credentialBindings[]</code>, <code>environmentBindings[]</code>, <code>publicationEndpoints[]</code></td>
+					<td>Resolves <code>${ENV}</code> in memory only; signs HMAC PR/gate requests</td>
+			</tr>
+	</tbody>
 </table>
 <h2 id="overview">Overview</h2>
 <p><span class="diagram-scroll"><img src="/loopwright/latest/docs/assets/diagrams/managed-controller-flow.svg" alt="Managed controller lifecycle" decoding="async"></span></p>
@@ -472,10 +494,10 @@
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TrustedRegistry</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TrustedRegistry</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">prod-operator-registry</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">resourceVersion</span><span class="p">:</span><span class="w"> </span><span class="l">rev-2026-11</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">handlers</span><span class="p">:</span><span class="w">
@@ -593,8 +615,8 @@
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">ControllerConfig</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">ControllerConfig</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">registry</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">prod-operator-registry</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">digest</span><span class="p">:</span><span class="w">

@@ -21,8 +21,8 @@
   
   
   
-  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/0.0/images/logo_hu_ef169d6c363295df.3b907f6ddb897e188ca8c4f5e172ccdde55f4d2c25ccc092666ccd2e59111856.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/0.0/images/logo_hu_90b015dd418204d9.f7018fba3843b4b28ddbafa2b3cd566eb4bd2c3636a8667504765088a2795aca.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/0.0/images/logo_hu_aebf313dad664680.8dfcd6a6909d121a4f4e9cf40b298600526e7e60b350f40eb0d9443367dc9c57.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/0.0/images/logo_hu_26148784bb4e8d8b.20009204f8ce0c077de9b006b9be7537900b67ab2b44849722ca06e453bf5e17.png">
   
   <title>Task Contract · Loopwright</title>
   
@@ -36,7 +36,7 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="topbar">
     
-    <a class="brand" href="/loopwright/0.0/" aria-label="Loopwright home"><img src="/loopwright/0.0/images/logo_hu_72b2e0d8fb22ffa2.7aa7cfbf568b33218252ff52c4e3788a7be1904dd5fe995594694f6baba85490.png" width="30" height="30" alt=""><span>Loopwright</span></a>
+    <a class="brand" href="/loopwright/0.0/" aria-label="Loopwright home"><img src="/loopwright/0.0/images/logo_hu_3ef7981c6e36e22.3a67bde1a9653790083e7482a4a417861ea9497865dd094c4e16ab87c63ec05b.png" width="30" height="30" alt=""><span>Loopwright</span></a>
     <nav class="top-links" aria-label="Main navigation">
       <a class="top-github-link" href="https://github.com/gpustack/loopwright" aria-label="GitHub repository">
         <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
@@ -234,6 +234,11 @@
       
     
   
+    
+    
+      
+    
+  
 
 
 <details class="nav-section" >
@@ -251,6 +256,12 @@
         
           
           <a title="Managed Controller" href="/loopwright/0.0/docs/walkthroughs/managed-controller/" >Managed Controller</a>
+        
+      
+        
+        
+          
+          <a title="Evolutionary Campaigns" href="/loopwright/0.0/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
         
       
     
@@ -276,6 +287,11 @@
     
       
         
+      
+    
+  
+    
+    
       
     
   
@@ -331,6 +347,12 @@
           <a title="Decision Routing" href="/loopwright/0.0/docs/configuration/decision-routing/" >Decision Routing</a>
         
       
+        
+        
+          
+          <a title="Evolution Campaign" href="/loopwright/0.0/docs/configuration/evolution-campaign/" >Evolution Campaign</a>
+        
+      
     
   </div>
 </details>
@@ -372,8 +394,8 @@
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TaskContract</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TaskContract</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">goal</span><span class="p">:</span><span class="w"> </span><span class="l">Update packages/app/manifest.json release metadata and pass verification.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">taskpack</span><span class="p">:</span><span class="w"> </span><span class="l">app-manifest</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">target</span><span class="p">:</span><span class="w">
@@ -471,460 +493,460 @@
 <h2 id="envelope-and-target">Envelope and target</h2>
 <p>Strict <code>contractSchema</code> validation requires <code>apiVersion</code>, <code>kind</code>, and <code>spec</code> and requires every declared <code>spec</code> key below to appear explicitly (<code>null</code> or <code>[]</code> where empty; unknown or omitted keys fail with <code>FIELD_REQUIRED</code> or <code>FIELD_UNKNOWN</code>):</p>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Required</th>
-          <th>Type and bounds</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>apiVersion</code></td>
-          <td>Yes</td>
-          <td><code>'loopwright.dev/v1alpha1'</code></td>
-          <td>Unified Loopwright document version</td>
-      </tr>
-      <tr>
-          <td><code>kind</code></td>
-          <td>Yes</td>
-          <td><code>'TaskContract'</code></td>
-          <td>Selects strict <code>contractSchema</code> validation (<code>&lt;= 1 MiB</code> input)</td>
-      </tr>
-      <tr>
-          <td><code>spec.goal</code></td>
-          <td>Yes</td>
-          <td>String (<code>1..4096</code> chars)</td>
-          <td>Plain-language objective evaluated by roles and recorded in receipts</td>
-      </tr>
-      <tr>
-          <td><code>spec.taskpack</code></td>
-          <td>Yes</td>
-          <td>Identifier (<code>1..64</code> chars)</td>
-          <td>Logical taskpack or workflow identifier (<code>Taskpack.metadata.name</code>)</td>
-      </tr>
-      <tr>
-          <td><code>spec.target.repository</code></td>
-          <td>Yes</td>
-          <td>Repo slug (<code>1..256</code> chars)</td>
-          <td>Target <code>owner/repo</code> path (<code>[A-Za-z0-9._/-]+</code>)</td>
-      </tr>
-      <tr>
-          <td><code>spec.target.baseRevision</code></td>
-          <td>Yes</td>
-          <td>Revision (<code>1..128</code> chars)</td>
-          <td>Base commit SHA, tag, or branch checked out before agent execution</td>
-      </tr>
-      <tr>
-          <td><code>spec.target.sourceRevision</code></td>
-          <td>Yes</td>
-          <td>Revision (<code>1..128</code> chars)</td>
-          <td>Upstream release, tag, or commit revision that triggered the work</td>
-      </tr>
-      <tr>
-          <td><code>spec.target.matrix</code></td>
-          <td>Yes (<code>null</code> allowed)</td>
-          <td><code>null</code> or cell list (<code>1..64</code>)</td>
-          <td>Target matrix (<code>{ id, platform, variant, hardware? }</code>); <code>hardware</code> required for <code>hardware_execution</code></td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Type and bounds</th>
+					<th>Meaning</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>apiVersion</code></td>
+					<td>Yes</td>
+					<td><code>'loopwright.dev/v1alpha1'</code></td>
+					<td>Unified Loopwright document version</td>
+			</tr>
+			<tr>
+					<td><code>kind</code></td>
+					<td>Yes</td>
+					<td><code>'TaskContract'</code></td>
+					<td>Selects strict <code>contractSchema</code> validation (<code>&lt;= 1 MiB</code> input)</td>
+			</tr>
+			<tr>
+					<td><code>spec.goal</code></td>
+					<td>Yes</td>
+					<td>String (<code>1..4096</code> chars)</td>
+					<td>Plain-language objective evaluated by roles and recorded in receipts</td>
+			</tr>
+			<tr>
+					<td><code>spec.taskpack</code></td>
+					<td>Yes</td>
+					<td>Identifier (<code>1..64</code> chars)</td>
+					<td>Logical taskpack or workflow identifier (<code>Taskpack.metadata.name</code>)</td>
+			</tr>
+			<tr>
+					<td><code>spec.target.repository</code></td>
+					<td>Yes</td>
+					<td>Repo slug (<code>1..256</code> chars)</td>
+					<td>Target <code>owner/repo</code> path (<code>[A-Za-z0-9._/-]+</code>)</td>
+			</tr>
+			<tr>
+					<td><code>spec.target.baseRevision</code></td>
+					<td>Yes</td>
+					<td>Revision (<code>1..128</code> chars)</td>
+					<td>Base commit SHA, tag, or branch checked out before agent execution</td>
+			</tr>
+			<tr>
+					<td><code>spec.target.sourceRevision</code></td>
+					<td>Yes</td>
+					<td>Revision (<code>1..128</code> chars)</td>
+					<td>Upstream release, tag, or commit revision that triggered the work</td>
+			</tr>
+			<tr>
+					<td><code>spec.target.matrix</code></td>
+					<td>Yes (<code>null</code> allowed)</td>
+					<td><code>null</code> or cell list (<code>1..64</code>)</td>
+					<td>Target matrix (<code>{ id, platform, variant, hardware? }</code>); <code>hardware</code> required for <code>hardware_execution</code></td>
+			</tr>
+	</tbody>
 </table>
 <h2 id="scope-and-context">Scope and context</h2>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Required</th>
-          <th>Type and bounds</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>spec.scope.writable</code></td>
-          <td>Yes</td>
-          <td>Glob list (<code>1..128</code> patterns)</td>
-          <td>Relative path globs where candidate edits are permitted</td>
-      </tr>
-      <tr>
-          <td><code>spec.scope.protected</code></td>
-          <td>Yes</td>
-          <td>Glob list (<code>0..128</code> patterns)</td>
-          <td>Read-only globs overriding <code>writable</code> (pass <code>[]</code> if none)</td>
-      </tr>
-      <tr>
-          <td><code>trustedContext.revision</code></td>
-          <td>Yes</td>
-          <td>Revision (<code>1..128</code> chars)</td>
-          <td>Version label for pinned supplementary context files</td>
-      </tr>
-      <tr>
-          <td><code>trustedContext.discovery</code></td>
-          <td>Yes</td>
-          <td><code>'disabled'</code></td>
-          <td>Disables unpinned workspace prompt discovery so all context is hash-bound</td>
-      </tr>
-      <tr>
-          <td><code>trustedContext.resources</code></td>
-          <td>Yes</td>
-          <td>Object list (<code>0..128</code> items)</td>
-          <td>Read-only context files (<code>&lt;= 1 MiB</code> total; pass <code>[]</code> when unused)</td>
-      </tr>
-      <tr>
-          <td><code>resources[].id</code></td>
-          <td>Conditional</td>
-          <td>Identifier (<code>1..64</code> chars)</td>
-          <td><strong>Required</strong> per item; matches <code>TrustedRegistry.spec.resources[].id</code></td>
-      </tr>
-      <tr>
-          <td><code>resources[].kind</code></td>
-          <td>Conditional</td>
-          <td><code>'instruction'</code> | <code>'skill'</code> | <code>'document'</code></td>
-          <td><strong>Required</strong> per item; declares how runtime mounts the context file</td>
-      </tr>
-      <tr>
-          <td><code>resources[].path</code></td>
-          <td>Conditional</td>
-          <td>Relative path (<code>1..1024</code> chars)</td>
-          <td><strong>Required</strong> per item; path resolved under <code>TrustedRegistry</code> directory</td>
-      </tr>
-      <tr>
-          <td><code>resources[].digest</code></td>
-          <td>Conditional</td>
-          <td><code>{ algorithm: 'sha256', hex }</code></td>
-          <td><strong>Required</strong> per item; 64-char lowercase SHA-256 hex digest</td>
-      </tr>
-      <tr>
-          <td><code>resources[].when</code></td>
-          <td>No</td>
-          <td><code>ResourceActivationRule</code></td>
-          <td>Optional predicate object (unconditional when omitted; requires <code>&gt;= 1</code> field)</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Type and bounds</th>
+					<th>Meaning</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>spec.scope.writable</code></td>
+					<td>Yes</td>
+					<td>Glob list (<code>1..128</code> patterns)</td>
+					<td>Relative path globs where candidate edits are permitted</td>
+			</tr>
+			<tr>
+					<td><code>spec.scope.protected</code></td>
+					<td>Yes</td>
+					<td>Glob list (<code>0..128</code> patterns)</td>
+					<td>Read-only globs overriding <code>writable</code> (pass <code>[]</code> if none)</td>
+			</tr>
+			<tr>
+					<td><code>trustedContext.revision</code></td>
+					<td>Yes</td>
+					<td>Revision (<code>1..128</code> chars)</td>
+					<td>Version label for pinned supplementary context files</td>
+			</tr>
+			<tr>
+					<td><code>trustedContext.discovery</code></td>
+					<td>Yes</td>
+					<td><code>'disabled'</code></td>
+					<td>Disables unpinned workspace prompt discovery so all context is hash-bound</td>
+			</tr>
+			<tr>
+					<td><code>trustedContext.resources</code></td>
+					<td>Yes</td>
+					<td>Object list (<code>0..128</code> items)</td>
+					<td>Read-only context files (<code>&lt;= 1 MiB</code> total; pass <code>[]</code> when unused)</td>
+			</tr>
+			<tr>
+					<td><code>resources[].id</code></td>
+					<td>Conditional</td>
+					<td>Identifier (<code>1..64</code> chars)</td>
+					<td><strong>Required</strong> per item; matches <code>TrustedRegistry.spec.resources[].id</code></td>
+			</tr>
+			<tr>
+					<td><code>resources[].kind</code></td>
+					<td>Conditional</td>
+					<td><code>'instruction'</code> | <code>'skill'</code> | <code>'document'</code></td>
+					<td><strong>Required</strong> per item; declares how runtime mounts the context file</td>
+			</tr>
+			<tr>
+					<td><code>resources[].path</code></td>
+					<td>Conditional</td>
+					<td>Relative path (<code>1..1024</code> chars)</td>
+					<td><strong>Required</strong> per item; path resolved under <code>TrustedRegistry</code> directory</td>
+			</tr>
+			<tr>
+					<td><code>resources[].digest</code></td>
+					<td>Conditional</td>
+					<td><code>{ algorithm: 'sha256', hex }</code></td>
+					<td><strong>Required</strong> per item; 64-char lowercase SHA-256 hex digest</td>
+			</tr>
+			<tr>
+					<td><code>resources[].when</code></td>
+					<td>No</td>
+					<td><code>ResourceActivationRule</code></td>
+					<td>Optional predicate object (unconditional when omitted; requires <code>&gt;= 1</code> field)</td>
+			</tr>
+	</tbody>
 </table>
 <h3 id="conditional-activation-rules">Conditional activation rules</h3>
 <p><code>resources[].when</code> filters pre-hashed <code>trustedContext.resources[]</code> per dispatch without runtime discovery (<code>discovery: 'disabled'</code>). Specified fields combine with logical <code>AND</code>, and values inside each list combine with logical <code>OR</code>:</p>
 <table>
-  <thead>
-      <tr>
-          <th>Predicate field</th>
-          <th>Bounds</th>
-          <th>Values and matching</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>changedPaths</code></td>
-          <td><code>1..128</code> globs</td>
-          <td>Relative path globs matching candidate diffs or initial <code>watchedPaths</code></td>
-      </tr>
-      <tr>
-          <td><code>extensions</code></td>
-          <td><code>1..64</code> suffixes</td>
-          <td>Lowercase <code>.ext</code> suffixes (<code>2..33</code> chars) matching changed file extensions</td>
-      </tr>
-      <tr>
-          <td><code>phases</code></td>
-          <td><code>1..4</code> phases</td>
-          <td><code>author</code>, <code>review</code>, <code>repair</code>, <code>rework</code> (<code>format</code> mounts zero conditional rules)</td>
-      </tr>
-      <tr>
-          <td><code>failedChecks</code></td>
-          <td><code>1..64</code> IDs</td>
-          <td>Check identifiers matching failed check receipts</td>
-      </tr>
-      <tr>
-          <td><code>failureCodes</code></td>
-          <td><code>1..64</code> codes</td>
-          <td>Check or verifier reason codes (<code>1..128</code> chars)</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Predicate field</th>
+					<th>Bounds</th>
+					<th>Values and matching</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>changedPaths</code></td>
+					<td><code>1..128</code> globs</td>
+					<td>Relative path globs matching candidate diffs or initial <code>watchedPaths</code></td>
+			</tr>
+			<tr>
+					<td><code>extensions</code></td>
+					<td><code>1..64</code> suffixes</td>
+					<td>Lowercase <code>.ext</code> suffixes (<code>2..33</code> chars) matching changed file extensions</td>
+			</tr>
+			<tr>
+					<td><code>phases</code></td>
+					<td><code>1..4</code> phases</td>
+					<td><code>author</code>, <code>review</code>, <code>repair</code>, <code>rework</code> (<code>format</code> mounts zero conditional rules)</td>
+			</tr>
+			<tr>
+					<td><code>failedChecks</code></td>
+					<td><code>1..64</code> IDs</td>
+					<td>Check identifiers matching failed check receipts</td>
+			</tr>
+			<tr>
+					<td><code>failureCodes</code></td>
+					<td><code>1..64</code> codes</td>
+					<td>Check or verifier reason codes (<code>1..128</code> chars)</td>
+			</tr>
+	</tbody>
 </table>
 <p>Local taskpacks protect <code>.git</code>, <code>&lt;controlRoot&gt;</code> (preserving the exact-file <code>spec.proposal.path</code> carve-out), <code>digests.lock.json</code>, and repository-declared <code>scope.protected</code> by default without hardcoded tool directories. GitHub Action and App entrypoints also protect <code>.github</code>, requiring dual-key <code>allowWorkflowWrites</code> for <code>.github/workflows/**</code>.</p>
 <h2 id="roles-and-steps">Roles and steps</h2>
 <h3 id="role-and-step-fields">Role and step fields</h3>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Required</th>
-          <th>Type and bounds</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>spec.roles</code></td>
-          <td>Yes</td>
-          <td>Object list (<code>1..64</code> roles)</td>
-          <td>Named model personas available to <code>agent</code> steps</td>
-      </tr>
-      <tr>
-          <td><code>roles[].id</code></td>
-          <td>Yes</td>
-          <td>Identifier (<code>1..64</code> chars)</td>
-          <td>Unique role ID bound via <code>ControllerConfig.spec.profiles.roles</code></td>
-      </tr>
-      <tr>
-          <td><code>roles[].adapter</code></td>
-          <td>Yes</td>
-          <td>Label (<code>'pi'</code>)</td>
-          <td>Isolated agent runtime adapter</td>
-      </tr>
-      <tr>
-          <td><code>roles[].provider</code></td>
-          <td>Yes</td>
-          <td>Label (<code>1..128</code> chars)</td>
-          <td>Token-based Pi provider or custom provider ID (matches <code>RoleProfile.selection.provider</code>)</td>
-      </tr>
-      <tr>
-          <td><code>roles[].model</code></td>
-          <td>Yes</td>
-          <td>Label (<code>1..128</code> chars)</td>
-          <td>Coding model ID (for example <code>glm-5.3</code>; see <a href="/loopwright/0.0/docs/configuration/taskpack/#model-configuration">Model configuration</a>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Type and bounds</th>
+					<th>Meaning</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>spec.roles</code></td>
+					<td>Yes</td>
+					<td>Object list (<code>1..64</code> roles)</td>
+					<td>Named model personas available to <code>agent</code> steps</td>
+			</tr>
+			<tr>
+					<td><code>roles[].id</code></td>
+					<td>Yes</td>
+					<td>Identifier (<code>1..64</code> chars)</td>
+					<td>Unique role ID bound via <code>ControllerConfig.spec.profiles.roles</code></td>
+			</tr>
+			<tr>
+					<td><code>roles[].adapter</code></td>
+					<td>Yes</td>
+					<td>Label (<code>'pi'</code>)</td>
+					<td>Isolated agent runtime adapter</td>
+			</tr>
+			<tr>
+					<td><code>roles[].provider</code></td>
+					<td>Yes</td>
+					<td>Label (<code>1..128</code> chars)</td>
+					<td>Token-based Pi provider or custom provider ID (matches <code>RoleProfile.selection.provider</code>)</td>
+			</tr>
+			<tr>
+					<td><code>roles[].model</code></td>
+					<td>Yes</td>
+					<td>Label (<code>1..128</code> chars)</td>
+					<td>Coding model ID (for example <code>glm-5.3</code>; see <a href="/loopwright/0.0/docs/configuration/taskpack/#model-configuration">Model configuration</a>
 )</td>
-      </tr>
-      <tr>
-          <td><code>roles[].thinking</code></td>
-          <td>Yes</td>
-          <td>Label (<code>1..128</code> chars)</td>
-          <td>Pi reasoning level (<code>off</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>)</td>
-      </tr>
-      <tr>
-          <td><code>roles[].tools</code></td>
-          <td>Yes</td>
-          <td>Tool list (<code>0..128</code> unique)</td>
-          <td>Allowed tools include <code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, <code>delete</code>, <code>mcp</code>, <code>codemode</code>, and <code>mcp__workspace__read_file</code></td>
-      </tr>
-      <tr>
-          <td><code>roles[].resourceIds</code></td>
-          <td>No</td>
-          <td>Identifier list (<code>0..128</code>)</td>
-          <td>Optional subset of <code>trustedContext.resources[].id</code> injected for this role</td>
-      </tr>
-      <tr>
-          <td><code>spec.steps</code></td>
-          <td>Yes</td>
-          <td>Object list (<code>1..256</code> nodes)</td>
-          <td>Acyclic execution graph (<code>&lt;= 2048</code> edges) of authoring and check steps (<code>&lt;= 256</code> checkpoints)</td>
-      </tr>
-      <tr>
-          <td><code>steps[].id</code></td>
-          <td>Yes</td>
-          <td>Identifier (<code>1..64</code> chars)</td>
-          <td>Unique step node ID bound via <code>ControllerConfig.spec.profiles.steps</code></td>
-      </tr>
-      <tr>
-          <td><code>steps[].kind</code></td>
-          <td>Yes</td>
-          <td><code>'agent'</code> or <code>'check'</code></td>
-          <td>Selects isolated role execution or independent verification</td>
-      </tr>
-      <tr>
-          <td><code>steps[].uses</code></td>
-          <td>Yes</td>
-          <td>Identifier (<code>1..64</code> chars)</td>
-          <td>Logical operation label mapped to an approved <code>TrustedRegistry</code> handler</td>
-      </tr>
-      <tr>
-          <td><code>steps[].roleId</code></td>
-          <td>Yes (<code>null</code> for check)</td>
-          <td>Identifier or <code>null</code></td>
-          <td>Non-null <code>roles[].id</code> when <code>kind: agent</code>; must be <code>null</code> when <code>kind: check</code></td>
-      </tr>
-      <tr>
-          <td><code>steps[].dependsOn</code></td>
-          <td>Yes</td>
-          <td>Identifier list</td>
-          <td>Upstream <code>steps[].id</code> nodes that must succeed first (pass <code>[]</code> for roots)</td>
-      </tr>
-      <tr>
-          <td><code>steps[].onRework</code></td>
-          <td>No</td>
-          <td><code>{ rejectTo, maxReworks }</code></td>
-          <td>Optional bounded subgraph reset targeting an ancestor step (<code>maxReworks</code>: <code>1..8</code>)</td>
-      </tr>
-      <tr>
-          <td><code>steps[].handoffs</code></td>
-          <td>No</td>
-          <td><code>1..16</code> <code>StepHandoffSelector</code></td>
-          <td>Non-compaction <code>agent</code> steps only (<code>&lt;= 65536</code> bytes aggregate)</td>
-      </tr>
-  </tbody>
+			</tr>
+			<tr>
+					<td><code>roles[].thinking</code></td>
+					<td>Yes</td>
+					<td>Label (<code>1..128</code> chars)</td>
+					<td>Pi reasoning level (<code>off</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>)</td>
+			</tr>
+			<tr>
+					<td><code>roles[].tools</code></td>
+					<td>Yes</td>
+					<td>Tool list (<code>0..128</code> unique)</td>
+					<td>Allowed tools include <code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, <code>delete</code>, <code>mcp</code>, <code>codemode</code>, and <code>mcp__workspace__read_file</code></td>
+			</tr>
+			<tr>
+					<td><code>roles[].resourceIds</code></td>
+					<td>No</td>
+					<td>Identifier list (<code>0..128</code>)</td>
+					<td>Optional subset of <code>trustedContext.resources[].id</code> injected for this role</td>
+			</tr>
+			<tr>
+					<td><code>spec.steps</code></td>
+					<td>Yes</td>
+					<td>Object list (<code>1..256</code> nodes)</td>
+					<td>Acyclic execution graph (<code>&lt;= 2048</code> edges) of authoring and check steps (<code>&lt;= 256</code> checkpoints)</td>
+			</tr>
+			<tr>
+					<td><code>steps[].id</code></td>
+					<td>Yes</td>
+					<td>Identifier (<code>1..64</code> chars)</td>
+					<td>Unique step node ID bound via <code>ControllerConfig.spec.profiles.steps</code></td>
+			</tr>
+			<tr>
+					<td><code>steps[].kind</code></td>
+					<td>Yes</td>
+					<td><code>'agent'</code> or <code>'check'</code></td>
+					<td>Selects isolated role execution or independent verification</td>
+			</tr>
+			<tr>
+					<td><code>steps[].uses</code></td>
+					<td>Yes</td>
+					<td>Identifier (<code>1..64</code> chars)</td>
+					<td>Logical operation label mapped to an approved <code>TrustedRegistry</code> handler</td>
+			</tr>
+			<tr>
+					<td><code>steps[].roleId</code></td>
+					<td>Yes (<code>null</code> for check)</td>
+					<td>Identifier or <code>null</code></td>
+					<td>Non-null <code>roles[].id</code> when <code>kind: agent</code>; must be <code>null</code> when <code>kind: check</code></td>
+			</tr>
+			<tr>
+					<td><code>steps[].dependsOn</code></td>
+					<td>Yes</td>
+					<td>Identifier list</td>
+					<td>Upstream <code>steps[].id</code> nodes that must succeed first (pass <code>[]</code> for roots)</td>
+			</tr>
+			<tr>
+					<td><code>steps[].onRework</code></td>
+					<td>No</td>
+					<td><code>{ rejectTo, maxReworks }</code></td>
+					<td>Optional bounded subgraph reset targeting an ancestor step (<code>maxReworks</code>: <code>1..8</code>)</td>
+			</tr>
+			<tr>
+					<td><code>steps[].handoffs</code></td>
+					<td>No</td>
+					<td><code>1..16</code> <code>StepHandoffSelector</code></td>
+					<td>Non-compaction <code>agent</code> steps only (<code>&lt;= 65536</code> bytes aggregate)</td>
+			</tr>
+	</tbody>
 </table>
 <h3 id="handoff-selectors">Handoff selectors</h3>
 <p><code>steps[].handoffs[]</code> extracts bounded read-only (<code>0o400</code>) context with <code>sourceSha256</code> and <code>extractSha256</code> provenance from a strict DAG ancestor <code>fromStep</code>:</p>
 <table>
-  <thead>
-      <tr>
-          <th>Selector field</th>
-          <th>Required</th>
-          <th>Values and bounds</th>
-          <th>Behavior</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>id</code></td>
-          <td>No</td>
-          <td>Identifier (<code>1..64</code> chars)</td>
-          <td>Unique selector ID within <code>steps[].handoffs</code></td>
-      </tr>
-      <tr>
-          <td><code>fromStep</code></td>
-          <td>Yes</td>
-          <td>Ancestor <code>steps[].id</code></td>
-          <td>Strict DAG ancestor (<code>GRAPH_CYCLE</code> / <code>REFERENCE_UNKNOWN</code> otherwise)</td>
-      </tr>
-      <tr>
-          <td><code>source.kind</code></td>
-          <td>Yes</td>
-          <td><code>'artifact'</code> | <code>'submission'</code> | <code>'verdict'</code></td>
-          <td>Reads <code>&lt;= 1 MiB</code> epoch artifact (<code>source.path</code>), <code>Submission</code>, or <code>StepVerdict</code></td>
-      </tr>
-      <tr>
-          <td><code>select.kind</code></td>
-          <td>Yes</td>
-          <td><code>'markdown_heading'</code> | <code>'json_pointer'</code> | <code>'full'</code></td>
-          <td>Fence-aware ATX heading (<code>includeSubheadings</code>), <code>1..32</code> RFC 6901 pointers, or slice</td>
-      </tr>
-      <tr>
-          <td><code>maxBytes</code></td>
-          <td>No</td>
-          <td>Integer (<code>64..65536</code>)</td>
-          <td>Per-selector UTF-8 cap (default <code>8192</code>; <code>&lt;= 65536</code> per step)</td>
-      </tr>
-      <tr>
-          <td><code>required</code></td>
-          <td>No</td>
-          <td>Boolean (<code>true</code> default)</td>
-          <td>Fails closed when missing if <code>true</code>; emits omitted provenance if <code>false</code></td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Selector field</th>
+					<th>Required</th>
+					<th>Values and bounds</th>
+					<th>Behavior</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>id</code></td>
+					<td>No</td>
+					<td>Identifier (<code>1..64</code> chars)</td>
+					<td>Unique selector ID within <code>steps[].handoffs</code></td>
+			</tr>
+			<tr>
+					<td><code>fromStep</code></td>
+					<td>Yes</td>
+					<td>Ancestor <code>steps[].id</code></td>
+					<td>Strict DAG ancestor (<code>GRAPH_CYCLE</code> / <code>REFERENCE_UNKNOWN</code> otherwise)</td>
+			</tr>
+			<tr>
+					<td><code>source.kind</code></td>
+					<td>Yes</td>
+					<td><code>'artifact'</code> | <code>'submission'</code> | <code>'verdict'</code></td>
+					<td>Reads <code>&lt;= 1 MiB</code> epoch artifact (<code>source.path</code>), <code>Submission</code>, or <code>StepVerdict</code></td>
+			</tr>
+			<tr>
+					<td><code>select.kind</code></td>
+					<td>Yes</td>
+					<td><code>'markdown_heading'</code> | <code>'json_pointer'</code> | <code>'full'</code></td>
+					<td>Fence-aware ATX heading (<code>includeSubheadings</code>), <code>1..32</code> RFC 6901 pointers, or slice</td>
+			</tr>
+			<tr>
+					<td><code>maxBytes</code></td>
+					<td>No</td>
+					<td>Integer (<code>64..65536</code>)</td>
+					<td>Per-selector UTF-8 cap (default <code>8192</code>; <code>&lt;= 65536</code> per step)</td>
+			</tr>
+			<tr>
+					<td><code>required</code></td>
+					<td>No</td>
+					<td>Boolean (<code>true</code> default)</td>
+					<td>Fails closed when missing if <code>true</code>; emits omitted provenance if <code>false</code></td>
+			</tr>
+	</tbody>
 </table>
 <p><code>json_pointer</code> decodes <code>~1</code> and <code>~0</code> escapes and rejects <code>__proto__</code>, <code>constructor</code>, and <code>prototype</code> segments.</p>
 <p>The Pi adapter restricts its runtime tool names further.
 For MCP access, it accepts <code>mcp__workspace__read_file</code>, not the generic <code>mcp</code> name.</p>
 <h3 id="step-kinds">Step kinds</h3>
 <table>
-  <thead>
-      <tr>
-          <th>Kind</th>
-          <th><code>roleId</code> rule</th>
-          <th>Runtime behavior</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>agent</code></td>
-          <td>Non-null <code>roles[].id</code></td>
-          <td>Launches an isolated Pi session under sandbox containment to author or repair changes</td>
-      </tr>
-      <tr>
-          <td><code>check</code></td>
-          <td><code>null</code></td>
-          <td>Runs an independent deterministic verifier worker or polls a remote <code>gate.v1</code> service</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Kind</th>
+					<th><code>roleId</code> rule</th>
+					<th>Runtime behavior</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>agent</code></td>
+					<td>Non-null <code>roles[].id</code></td>
+					<td>Launches an isolated Pi session under sandbox containment to author or repair changes</td>
+			</tr>
+			<tr>
+					<td><code>check</code></td>
+					<td><code>null</code></td>
+					<td>Runs an independent deterministic verifier worker or polls a remote <code>gate.v1</code> service</td>
+			</tr>
+	</tbody>
 </table>
 <h2 id="budgets-and-enforcement">Budgets and enforcement</h2>
 <h3 id="budget-fields">Budget fields</h3>
 <p>Every retry and repair attempt draws from the same parent <code>budgets</code> envelope. Validation fails with <code>BUDGET_INCONSISTENT</code> if any per-call or retry cap exceeds its parent ceiling:</p>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Required</th>
-          <th>Type and constraint</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>budgets.wallTimeMs</code></td>
-          <td>Yes</td>
-          <td>Integer (<code>&gt;= 1</code> ms)</td>
-          <td>Total wall-clock timeout; must exceed <code>ControllerConfig.spec.controls.drainReserveMs</code></td>
-      </tr>
-      <tr>
-          <td><code>budgets.totalTokens</code></td>
-          <td>Yes</td>
-          <td>Integer (<code>&gt;= 1</code>)</td>
-          <td>Cumulative prompt + completion token ceiling across the entire run</td>
-      </tr>
-      <tr>
-          <td><code>budgets.perCallOutputTokens</code></td>
-          <td>Yes</td>
-          <td>Integer (<code>1 .. totalTokens</code>)</td>
-          <td>Maximum completion tokens per model call (<code>&lt;= 262144</code> in Pi profiles)</td>
-      </tr>
-      <tr>
-          <td><code>budgets.maxModelCalls</code></td>
-          <td>Yes</td>
-          <td>Integer (<code>&gt;= 1</code>)</td>
-          <td>Maximum total model API invocations across authoring, compaction, and repairs</td>
-      </tr>
-      <tr>
-          <td><code>budgets.maxConcurrency</code></td>
-          <td>Yes</td>
-          <td>Integer (<code>1 .. maxModelCalls</code>)</td>
-          <td>Maximum steps dispatched concurrently by the scheduler</td>
-      </tr>
-      <tr>
-          <td><code>budgets.maxFormatRepairs</code></td>
-          <td>Yes</td>
-          <td>Integer (<code>0 .. maxModelCalls</code>)</td>
-          <td>Allowed repair turns when agent output fails structured submission parsing</td>
-      </tr>
-      <tr>
-          <td><code>budgets.maxImplementationRepairs</code></td>
-          <td>Yes</td>
-          <td>Integer (<code>0 .. maxModelCalls</code>)</td>
-          <td>Allowed repair turns after an independent check or gate reports failure</td>
-      </tr>
-      <tr>
-          <td><code>budgets.maxTransportRetries</code></td>
-          <td>Yes</td>
-          <td>Integer (<code>0 .. maxModelCalls</code>)</td>
-          <td>Allowed retries on transient network/provider transport failures</td>
-      </tr>
-      <tr>
-          <td><code>budgets.enforcement.*</code></td>
-          <td>Yes</td>
-          <td>All 7 dimension keys</td>
-          <td>Enforcement mode for <code>wallTime</code>, <code>tokens</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, <code>transportRetries</code></td>
-      </tr>
-      <tr>
-          <td><code>budgets.overlay</code></td>
-          <td>No</td>
-          <td><code>{ maxFiles, maxBytes }</code></td>
-          <td>Optional overlay caps (<code>maxFiles</code>: <code>1..16384</code>, <code>maxBytes</code>: <code>1024..17179869184</code> (<code>16 GiB</code>); default <code>128</code>, <code>4 MiB</code>)</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Type and constraint</th>
+					<th>Meaning</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>budgets.wallTimeMs</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>&gt;= 1</code> ms)</td>
+					<td>Total wall-clock timeout; must exceed <code>ControllerConfig.spec.controls.drainReserveMs</code></td>
+			</tr>
+			<tr>
+					<td><code>budgets.totalTokens</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>&gt;= 1</code>)</td>
+					<td>Cumulative prompt + completion token ceiling across the entire run</td>
+			</tr>
+			<tr>
+					<td><code>budgets.perCallOutputTokens</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>1 .. totalTokens</code>)</td>
+					<td>Maximum completion tokens per model call (<code>&lt;= 262144</code> in Pi profiles)</td>
+			</tr>
+			<tr>
+					<td><code>budgets.maxModelCalls</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>&gt;= 1</code>)</td>
+					<td>Maximum total model API invocations across authoring, compaction, and repairs</td>
+			</tr>
+			<tr>
+					<td><code>budgets.maxConcurrency</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>1 .. maxModelCalls</code>)</td>
+					<td>Maximum steps dispatched concurrently by the scheduler</td>
+			</tr>
+			<tr>
+					<td><code>budgets.maxFormatRepairs</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>0 .. maxModelCalls</code>)</td>
+					<td>Allowed repair turns when agent output fails structured submission parsing</td>
+			</tr>
+			<tr>
+					<td><code>budgets.maxImplementationRepairs</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>0 .. maxModelCalls</code>)</td>
+					<td>Allowed repair turns after an independent check or gate reports failure</td>
+			</tr>
+			<tr>
+					<td><code>budgets.maxTransportRetries</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>0 .. maxModelCalls</code>)</td>
+					<td>Allowed retries on transient network/provider transport failures</td>
+			</tr>
+			<tr>
+					<td><code>budgets.enforcement.*</code></td>
+					<td>Yes</td>
+					<td>All 7 dimension keys</td>
+					<td>Enforcement mode for <code>wallTime</code>, <code>tokens</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, <code>transportRetries</code></td>
+			</tr>
+			<tr>
+					<td><code>budgets.overlay</code></td>
+					<td>No</td>
+					<td><code>{ maxFiles, maxBytes }</code></td>
+					<td>Optional overlay caps (<code>maxFiles</code>: <code>1..16384</code>, <code>maxBytes</code>: <code>1024..17179869184</code> (<code>16 GiB</code>); default <code>128</code>, <code>4 MiB</code>)</td>
+			</tr>
+	</tbody>
 </table>
 <h3 id="enforcement-modes">Enforcement modes</h3>
 <p>Configure <code>spec.budgets.enforcement.&lt;dimension&gt;</code> for each of the seven dimensions (<code>wallTime</code>, <code>tokens</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, <code>transportRetries</code>):</p>
 <table>
-  <thead>
-      <tr>
-          <th>Mode</th>
-          <th>Admission behavior</th>
-          <th>Controller usage</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>hard_admission</code></td>
-          <td>Pre-reserves quota in SQLite before dispatch; refuses dispatch if remaining allowance is insufficient</td>
-          <td>Required for <code>wallTime</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, and <code>transportRetries</code></td>
-      </tr>
-      <tr>
-          <td><code>soft_accounting</code></td>
-          <td>Records actual post-call usage and halts subsequent calls once ceiling is reached</td>
-          <td>Used for <code>tokens</code> because exact output token counts are only known after model generation</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Mode</th>
+					<th>Admission behavior</th>
+					<th>Controller usage</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>hard_admission</code></td>
+					<td>Pre-reserves quota in SQLite before dispatch; refuses dispatch if remaining allowance is insufficient</td>
+					<td>Required for <code>wallTime</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, and <code>transportRetries</code></td>
+			</tr>
+			<tr>
+					<td><code>soft_accounting</code></td>
+					<td>Records actual post-call usage and halts subsequent calls once ceiling is reached</td>
+					<td>Used for <code>tokens</code> because exact output token counts are only known after model generation</td>
+			</tr>
+	</tbody>
 </table>
 <h2 id="acceptance-and-evidence">Acceptance and evidence</h2>
 <h3 id="artifact-manifests">Artifact manifests</h3>
@@ -934,156 +956,174 @@ Admission selects it only if the baseline has at most 128 files and 4 MiB total 
 Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.</p>
 <p>Otherwise, admission selects <code>tree_overlay</code> with <code>{ baseTree, entries, deleted }</code> (<code>&lt;= 256</code> state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors <code>budgets.overlay</code> (default <code>128</code> entries / <code>4 MiB</code>, configurable up to <code>16,384</code> files / <code>16 GiB</code> via verified CAS blob pointers).</p>
 <p>Verifier-namespaced descriptors (<code>.loopwright-verifier/&lt;slotId&gt;/*</code>) use a dedicated verifier output budget (<code>64</code> files per slot, <code>256</code> total files, and <code>16 GiB</code> total bytes) separate from candidate <code>budgets.overlay.maxBytes</code>.</p>
-<p><code>ArtifactRef</code> accepts optional <code>uri</code> (<code>&lt;= 2048</code> chars) and <code>mediaType</code> (<code>&lt;= 128</code> chars), omitted from canonical serialization when unset. <code>Evidence</code> and <code>EvaluatedCheck</code> accept optional <code>metrics</code> (finite numbers, strings, or booleans), <code>findings</code>, and <code>detail</code> even on <code>passed</code> (<code>Evidence.spec.reason</code> stays <code>null</code>).</p>
+<p><code>ArtifactRef</code> accepts optional <code>uri</code> (<code>&lt;= 2048</code> chars) and <code>mediaType</code> (<code>&lt;= 128</code> chars), omitted from canonical serialization when unset. <code>Evidence.spec</code> accepts optional <code>metrics</code>, <code>findings</code>, <code>detail</code>, <code>bucketMetrics</code> (<code>1..64</code> buckets, <code>&lt;= 16</code> numeric metrics and <code>&lt;= 8</code> dimensions per bucket), and closed-enum <code>hardwareDiagnostics</code> (<code>boundPipeline</code>: <code>hbm | l2 | smem_lds_ub | tensor_cube | vector_valu | host_launch | comm | unknown</code>, optional counters/percentages/stalls).</p>
 <h3 id="acceptance-fields">Acceptance fields</h3>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Required</th>
-          <th>Type and bounds</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>acceptance.required</code></td>
-          <td>Yes</td>
-          <td>Identifier list (<code>1..256</code>)</td>
-          <td>Check IDs that must all report <code>passed</code> before a candidate can complete</td>
-      </tr>
-      <tr>
-          <td><code>acceptance.checks</code></td>
-          <td>Yes</td>
-          <td>Object list (<code>1..256</code> items)</td>
-          <td>Declares every check ID referenced in <code>required</code> (plus any optional checks)</td>
-      </tr>
-      <tr>
-          <td><code>checks[].id</code></td>
-          <td>Yes</td>
-          <td>Identifier (<code>1..64</code> chars)</td>
-          <td>Check ID matching the verifier handler&rsquo;s <code>checkId</code> parameter</td>
-      </tr>
-      <tr>
-          <td><code>checks[].allowedEvidenceLevels</code></td>
-          <td>Yes</td>
-          <td>Enum list (<code>1..5</code> unique)</td>
-          <td>Acceptable provenance tiers; <code>hardware_execution</code> must appear alone as <code>['hardware_execution']</code></td>
-      </tr>
-      <tr>
-          <td><code>checks[].targetCellId</code></td>
-          <td>Conditional</td>
-          <td>Identifier (<code>1..64</code> chars)</td>
-          <td><strong>Required</strong> for <code>hardware_execution</code>; references a <code>target.matrix</code> cell with <code>hardware</code></td>
-      </tr>
-      <tr>
-          <td><code>checks[].allowSyntheticHardwareProbe</code></td>
-          <td>No</td>
-          <td>Boolean (default <code>false</code>)</td>
-          <td>Permits <code>probeKind: 'synthetic_fixture'</code> in <code>hardwareProvenance</code> for fixture tests</td>
-      </tr>
-      <tr>
-          <td><code>checks[].metricThresholds</code></td>
-          <td>No</td>
-          <td>Rule list (<code>0..32</code> items)</td>
-          <td>Quantitative <code>bounds</code> and <code>comparative</code> rules verified against <code>evidence.spec.metrics</code></td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Type and bounds</th>
+					<th>Meaning</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>acceptance.required</code></td>
+					<td>Yes</td>
+					<td>Identifier list (<code>1..256</code>)</td>
+					<td>Check IDs that must all report <code>passed</code> before a candidate can complete</td>
+			</tr>
+			<tr>
+					<td><code>acceptance.checks</code></td>
+					<td>Yes</td>
+					<td>Object list (<code>1..256</code> items)</td>
+					<td>Declares every check ID referenced in <code>required</code> (plus any optional checks)</td>
+			</tr>
+			<tr>
+					<td><code>checks[].id</code></td>
+					<td>Yes</td>
+					<td>Identifier (<code>1..64</code> chars)</td>
+					<td>Check ID matching the verifier handler&rsquo;s <code>checkId</code> parameter</td>
+			</tr>
+			<tr>
+					<td><code>checks[].allowedEvidenceLevels</code></td>
+					<td>Yes</td>
+					<td>Enum list (<code>1..5</code> unique)</td>
+					<td>Acceptable provenance tiers; <code>hardware_execution</code> must appear alone as <code>['hardware_execution']</code></td>
+			</tr>
+			<tr>
+					<td><code>checks[].targetCellId</code></td>
+					<td>Conditional</td>
+					<td>Identifier (<code>1..64</code> chars)</td>
+					<td><strong>Required</strong> for <code>hardware_execution</code>; references a <code>target.matrix</code> cell with <code>hardware</code></td>
+			</tr>
+			<tr>
+					<td><code>checks[].allowSyntheticHardwareProbe</code></td>
+					<td>No</td>
+					<td>Boolean (default <code>false</code>)</td>
+					<td>Permits <code>probeKind: 'synthetic_fixture'</code> in <code>hardwareProvenance</code> for fixture tests</td>
+			</tr>
+			<tr>
+					<td><code>checks[].metricThresholds</code></td>
+					<td>No</td>
+					<td>Rule list (<code>0..32</code> items)</td>
+					<td>Quantitative <code>bounds</code> and <code>comparative</code> rules verified against <code>evidence.spec.metrics</code></td>
+			</tr>
+	</tbody>
 </table>
 <h3 id="evidence-levels">Evidence levels</h3>
 <table>
-  <thead>
-      <tr>
-          <th>Level</th>
-          <th>Observation source</th>
-          <th>Qualification boundary</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>static_inspection</code></td>
-          <td>Deterministic byte or AST parser</td>
-          <td>Inert file inspection only; executes no target code</td>
-      </tr>
-      <tr>
-          <td><code>synthetic_fixture</code></td>
-          <td>Controlled local test fixture</td>
-          <td>Proves harness logic only; never qualifies live external systems</td>
-      </tr>
-      <tr>
-          <td><code>local_execution</code></td>
-          <td>Isolated verifier worker on current host</td>
-          <td>Scoped to current OS/host environment (<code>json-artifact.v1</code>, <code>scope.v1</code>, <code>no-change.v1</code>)</td>
-      </tr>
-      <tr>
-          <td><code>external_service</code></td>
-          <td>Signed <code>gate.v1</code> receipt from remote gate</td>
-          <td>Requires trusted <code>gateEndpoints[]</code> URL and HMAC signing credential</td>
-      </tr>
-      <tr>
-          <td><code>hardware_execution</code></td>
-          <td>Dedicated physical target hardware runner</td>
-          <td>Requires unmixed <code>['hardware_execution']</code>, hardware <code>targetCellId</code>, and <code>benchmark-gate.v1</code></td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Level</th>
+					<th>Observation source</th>
+					<th>Qualification boundary</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>static_inspection</code></td>
+					<td>Deterministic byte or AST parser</td>
+					<td>Inert file inspection only; executes no target code</td>
+			</tr>
+			<tr>
+					<td><code>synthetic_fixture</code></td>
+					<td>Controlled local test fixture</td>
+					<td>Proves harness logic only; never qualifies live external systems</td>
+			</tr>
+			<tr>
+					<td><code>local_execution</code></td>
+					<td>Isolated verifier worker on current host</td>
+					<td>Scoped to current OS/host environment (<code>json-artifact.v1</code>, <code>scope.v1</code>, <code>no-change.v1</code>)</td>
+			</tr>
+			<tr>
+					<td><code>external_service</code></td>
+					<td>Signed <code>gate.v1</code> receipt from remote gate</td>
+					<td>Requires trusted <code>gateEndpoints[]</code> URL and HMAC signing credential</td>
+			</tr>
+			<tr>
+					<td><code>hardware_execution</code></td>
+					<td>Dedicated physical target hardware runner</td>
+					<td>Requires unmixed <code>['hardware_execution']</code>, hardware <code>targetCellId</code>, and <code>benchmark-gate.v1</code></td>
+			</tr>
+	</tbody>
 </table>
 <h3 id="hardware-target-cells">Hardware target cells</h3>
 <p>Each <code>spec.target.matrix[]</code> cell accepts an optional <code>hardware</code> block alongside <code>id</code>, <code>platform</code>, and <code>variant</code>. Omitting unset optional fields preserves existing <code>targetMatrixDigest</code> hashes.</p>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Required</th>
-          <th>Type and bounds</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>hardware.accelerator</code></td>
-          <td>Yes</td>
-          <td>Printable ASCII (<code>1..64</code>)</td>
-          <td>Target accelerator label (such as <code>sm_89</code>, <code>sm_90a</code>, <code>ascend_910b</code>, <code>gfx1101</code>)</td>
-      </tr>
-      <tr>
-          <td><code>hardware.isolationMode</code></td>
-          <td>Yes</td>
-          <td><code>'whole_device'</code> | <code>'sliced'</code></td>
-          <td>Whole-device exclusivity or sliced accelerator partition mode</td>
-      </tr>
-      <tr>
-          <td><code>hardware.deviceCount</code></td>
-          <td>No</td>
-          <td>Safe integer (<code>1..64</code>)</td>
-          <td>Expected device count verified against observed <code>hardwareProvenance</code></td>
-      </tr>
-      <tr>
-          <td><code>hardware.driverConstraint</code></td>
-          <td>No</td>
-          <td>Printable string (<code>1..128</code>)</td>
-          <td>Exact driver match or <code>&gt;=&lt;dotted-version&gt;</code> minimum version constraint</td>
-      </tr>
-      <tr>
-          <td><code>hardware.topology</code></td>
-          <td>No</td>
-          <td>Printable string (<code>1..128</code>)</td>
-          <td>Optional interconnect or device topology constraint</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Type and bounds</th>
+					<th>Meaning</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>hardware.accelerator</code></td>
+					<td>Yes</td>
+					<td>Printable ASCII (<code>1..64</code>)</td>
+					<td>Target accelerator label (such as <code>sm_89</code>, <code>sm_90a</code>, <code>ascend_910b</code>, <code>gfx1101</code>)</td>
+			</tr>
+			<tr>
+					<td><code>hardware.isolationMode</code></td>
+					<td>Yes</td>
+					<td><code>'whole_device'</code> | <code>'sliced'</code></td>
+					<td>Whole-device exclusivity or sliced accelerator partition mode</td>
+			</tr>
+			<tr>
+					<td><code>hardware.deviceCount</code></td>
+					<td>No</td>
+					<td>Safe integer (<code>1..64</code>)</td>
+					<td>Expected device count verified against observed <code>hardwareProvenance</code></td>
+			</tr>
+			<tr>
+					<td><code>hardware.driverConstraint</code></td>
+					<td>No</td>
+					<td>Printable string (<code>1..128</code>)</td>
+					<td>Exact driver match or <code>&gt;=&lt;dotted-version&gt;</code> minimum version constraint</td>
+			</tr>
+			<tr>
+					<td><code>hardware.topology</code></td>
+					<td>No</td>
+					<td>Printable string (<code>1..128</code>)</td>
+					<td>Optional interconnect or device topology constraint</td>
+			</tr>
+			<tr>
+					<td><code>hardware.forbiddenSymbolPatterns</code></td>
+					<td>No</td>
+					<td><code>0..64</code> ASCII substrings (<code>&lt;= 128</code>)</td>
+					<td>Glob-free Stage A symbol denylist (<code>cublas</code>, <code>rocblas</code>, <code>aclnn</code>)</td>
+			</tr>
+			<tr>
+					<td><code>hardware.maxRegisterCount</code></td>
+					<td>No</td>
+					<td>Safe integer (<code>&gt;= 0</code>)</td>
+					<td>Stage A per-thread register ceiling before Stage B</td>
+			</tr>
+			<tr>
+					<td><code>hardware.maxLocalSpillBytes</code></td>
+					<td>No</td>
+					<td>Safe integer (<code>&gt;= 0</code>)</td>
+					<td>Stage A local memory spill ceiling (<code>STAGE_A_STATIC_AUDIT_FAILED</code>)</td>
+			</tr>
+	</tbody>
 </table>
 <h3 id="thresholds-and-provenance">Thresholds and provenance</h3>
 <ul>
-<li><strong>Bounds rules</strong>: <code>{ kind: 'bounds', metric, min?, max? }</code> requires at least one finite endpoint (<code>min &lt;= max</code>; <code>-0</code> normalizes to <code>0</code>).</li>
-<li><strong>Comparative rules</strong>: <code>{ kind: 'comparative', metric, baselineMetric, operator, threshold }</code> supports <code>min_ratio</code>, <code>max_ratio</code>, and <code>max_delta</code> (<code>baseline &gt; 0</code> for ratios).</li>
+<li><strong>Bounds and comparative rules</strong>: <code>bounds</code> requires <code>{ metric, min?, max? }</code>; <code>comparative</code> requires <code>{ metric, baselineMetric, operator, threshold }</code> (<code>min_ratio</code>, <code>max_ratio</code>, <code>max_delta</code>). Both accept optional <code>bucketScope</code> (<code>'aggregate' | 'all_buckets' | { bucketId }</code>).</li>
 <li><strong>Hardware provenance</strong>: Passing <code>hardware_execution</code> <code>Evidence</code> requires <code>hardwareProvenance</code> (<code>targetCellId</code>, <code>probeKind: 'physical' | 'synthetic_fixture'</code>, <code>vendor</code>, <code>deviceModel</code>, <code>accelerator</code>, <code>isolationMode</code>, <code>deviceCount</code>, <code>driverVersion</code>, <code>runtimeVersion</code>, <code>topology?</code>, <code>workloadDigest</code>, <code>clockLockMode: 'locked' | 'unlocked' | 'unknown'</code>).</li>
-<li><strong>Independent core check</strong>: <code>evaluateAcceptance</code> requires <code>probeKind: 'physical'</code> unless <code>allowSyntheticHardwareProbe</code> is <code>true</code>, and blocks mismatches (<code>hardware_provenance_mismatch</code>, <code>metric_threshold_failed</code>).</li>
+<li><strong>Independent core check</strong>: <code>evaluateAcceptance</code> enforces <code>bucketScope</code> across <code>bucketMetrics</code>, requires <code>probeKind: 'physical'</code> unless <code>allowSyntheticHardwareProbe</code> is <code>true</code>, and blocks mismatches (<code>hardware_provenance_mismatch</code>, <code>metric_threshold_failed</code>).</li>
 </ul>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
       <ul class="related-pages"><li><a href="/loopwright/0.0/docs/walkthroughs/managed-controller/">Managed Controller</a>
  (end-to-end CLI setup and relationship diagram)</li><li><a href="/loopwright/0.0/docs/configuration/taskpack/">Taskpack</a>
- (single-file automated mode)</li></ul>
+ (single-file automated mode)</li><li><a href="/loopwright/0.0/docs/configuration/evolution-campaign/">Evolution Campaign</a>
+ (multi-generation search, islands, and bundle export schema)</li></ul>
     </section><section class="next-page">
         <h2>Next</h2>
         <div><a href="/loopwright/0.0/docs/configuration/controller-and-registry/">Controller and Registry</a>

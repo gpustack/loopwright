@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <script>
+    (() => {
+      try {
+        const theme = localStorage.getItem("theme");
+        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.themeChoice = theme === "light" || theme === "dark" ? theme : "system";
+        if (localStorage.getItem("sidebar-collapsed") === "true") {
+          document.documentElement.dataset.sidebarCollapsed = "true";
+        }
+      } catch {
+        document.documentElement.dataset.themeChoice = "system";
+      }
+    })();
+  </script>
+  
+  
+  
+  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/0.0/images/logo_hu_aebf313dad664680.8dfcd6a6909d121a4f4e9cf40b298600526e7e60b350f40eb0d9443367dc9c57.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/0.0/images/logo_hu_26148784bb4e8d8b.20009204f8ce0c077de9b006b9be7537900b67ab2b44849722ca06e453bf5e17.png">
+  
+  <title>Evolutionary Campaigns · Loopwright</title>
+  
+  <link rel="alternate" type="text/markdown" href="/loopwright/0.0/docs/walkthroughs/evolutionary-campaigns/index.md">
+  
+  <link rel="describedby" href="/loopwright/0.0/llms.txt">
+  <link rel="stylesheet" href="/loopwright/0.0/css/site.ec048c8ebf1c3f4c4d6f42d0df85a7beafbf4d566f1c8eedf65c01f3969b3500.css">
+  <link rel="stylesheet" href="/loopwright/0.0/css/code.d2570c1cc6480f9c62bc31ec538eef2578ce80980588c469638a5f95416bfc7b.css">
+</head>
+<body class="docs-page">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header class="topbar">
+    
+    <a class="brand" href="/loopwright/0.0/" aria-label="Loopwright home"><img src="/loopwright/0.0/images/logo_hu_3ef7981c6e36e22.3a67bde1a9653790083e7482a4a417861ea9497865dd094c4e16ab87c63ec05b.png" width="30" height="30" alt=""><span>Loopwright</span></a>
+    <nav class="top-links" aria-label="Main navigation">
+      <a class="top-github-link" href="https://github.com/gpustack/loopwright" aria-label="GitHub repository">
+        <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
+        <span>GitHub</span>
+      </a>
+      
+  
+  <details class="picker version-picker" id="version-picker"
+    data-root="https://docs.gpustack.ai/loopwright/" data-version="0.0"
+    data-release-kind="stable"
+    data-home="/loopwright/0.0/" data-page="/loopwright/0.0/docs/walkthroughs/evolutionary-campaigns/">
+    <summary>
+      <svg class="picker-icon" aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>
+      <span class="visually-hidden">Documentation version: </span><span class="picker-value">0.0</span>
+      <svg class="picker-caret" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>
+    </summary>
+    <div class="picker-panel">
+      <span class="picker-row is-current" aria-current="true">0.0</span>
+      <p class="picker-note">Enable JavaScript to list other versions.</p>
+    </div>
+  </details>
+  <span id="version-status" class="visually-hidden" role="status"></span>
+
+
+<details class="picker theme-picker">
+  <summary>
+    <span class="theme-icons" aria-hidden="true">
+      <svg class="theme-icon theme-icon-light" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8Zm0-1.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.061 1.06a.749.749 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-9.193 9.193a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 1 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.749.749 0 1 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.061Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 1 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Z"/></svg>
+      <svg class="theme-icon theme-icon-dark" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/></svg>
+      <svg class="theme-icon theme-icon-system" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.75 2h12.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 14.25 13H8.75v2h1.5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1 0-1.5h1.5v-2H1.75A1.75 1.75 0 0 1 0 11.25v-7.5C0 2.784.784 2 1.75 2Zm0 1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+    </span>
+    <span class="visually-hidden">Theme</span>
+    <svg class="picker-caret" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>
+  </summary>
+  <div class="picker-panel">
+    <button class="picker-row theme-row" type="button" data-theme-choice="light">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8Zm0-1.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.061 1.06a.749.749 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-9.193 9.193a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 1 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.749.749 0 1 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.061Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 1 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Z"/></svg>
+      <span>Light</span>
+    </button>
+    <button class="picker-row theme-row" type="button" data-theme-choice="dark">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/></svg>
+      <span>Dark</span>
+    </button>
+    <button class="picker-row theme-row" type="button" data-theme-choice="system" aria-current="true">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.75 2h12.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 14.25 13H8.75v2h1.5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1 0-1.5h1.5v-2H1.75A1.75 1.75 0 0 1 0 11.25v-7.5C0 2.784.784 2 1.75 2Zm0 1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+      <span>System</span>
+    </button>
+  </div>
+</details>
+
+      <form class="top-search" role="search" action="/loopwright/0.0/search/" method="get">
+        <label class="visually-hidden" for="top-query">Search documentation</label>
+        <input id="top-query" name="q" type="search" placeholder="Search docs" autocomplete="off" spellcheck="false">
+        <button type="submit" aria-label="Search"><svg aria-hidden="true" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg></button>
+      </form>
+    </nav>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" aria-label="Documentation navigation">
+      <button class="nav-toggle" type="button" aria-controls="docs-navigation" aria-expanded="false">Browse documentation</button>
+      <button class="sidebar-toggle" type="button" aria-controls="docs-navigation" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
+        <svg class="sidebar-toggle-icon" aria-hidden="true" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2.5" width="12" height="11" rx="2"/>
+          <line x1="6" y1="2.5" x2="6" y2="13.5"/>
+          <polyline class="sidebar-icon-arrow" points="10.5 6 8.5 8 10.5 10"/>
+        </svg>
+      </button>
+      <nav id="docs-navigation" class="sidebar-inner">
+        <a class="nav-home" href="/loopwright/0.0/" >Overview</a>
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Getting Started</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Architecture" href="/loopwright/0.0/docs/getting-started/architecture/" >Architecture</a>
+        
+      
+        
+        
+          
+          <a title="Installation" href="/loopwright/0.0/docs/getting-started/installation/" >Installation</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Operations</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="GitHub Action" href="/loopwright/0.0/docs/operations/github-action/" >GitHub Action</a>
+        
+      
+        
+        
+          
+          <a title="GitHub App" href="/loopwright/0.0/docs/operations/github-app/" >GitHub App</a>
+        
+      
+        
+        
+          
+          <a title="CLI" href="/loopwright/0.0/docs/operations/cli/" >CLI</a>
+        
+      
+        
+        
+          
+          <a title="Coding Agents" href="/loopwright/0.0/docs/operations/coding-agents/" >Coding Agents</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+        
+      
+    
+  
+
+
+<details class="nav-section" open>
+  <summary>Walkthroughs</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Declarative Taskpack" href="/loopwright/0.0/docs/walkthroughs/declarative-taskpack/" >Declarative Taskpack</a>
+        
+      
+        
+        
+          
+          <a title="Managed Controller" href="/loopwright/0.0/docs/walkthroughs/managed-controller/" >Managed Controller</a>
+        
+      
+        
+        
+          
+          <a title="Evolutionary Campaigns" href="/loopwright/0.0/docs/walkthroughs/evolutionary-campaigns/" aria-current="page">Evolutionary Campaigns</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Configuration</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Taskpack" href="/loopwright/0.0/docs/configuration/taskpack/" >Taskpack</a>
+        
+      
+        
+        
+          
+          <a title="Task Contract" href="/loopwright/0.0/docs/configuration/task-contract/" >Task Contract</a>
+        
+      
+        
+        
+          
+          <a title="Controller and Registry" href="/loopwright/0.0/docs/configuration/controller-and-registry/" >Controller and Registry</a>
+        
+      
+        
+        
+          
+          <a title="Sandbox Backends" href="/loopwright/0.0/docs/configuration/sandbox-backends/" >Sandbox Backends</a>
+        
+      
+        
+        
+          
+          <a title="Decision Routing" href="/loopwright/0.0/docs/configuration/decision-routing/" >Decision Routing</a>
+        
+      
+        
+        
+          
+          <a title="Evolution Campaign" href="/loopwright/0.0/docs/configuration/evolution-campaign/" >Evolution Campaign</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+      </nav>
+    </aside>
+    <main id="main-content">
+      
+      <div class="breadcrumbs">
+        <a href="/loopwright/0.0/docs/">Docs</a><span aria-hidden="true">/</span>
+        
+          
+        
+        <span aria-current="page">Evolutionary Campaigns</span>
+      </div>
+      
+      <article>
+        
+  <h1 id="evolutionary-campaigns">Evolutionary Campaigns</h1>
+<p>Evolutionary campaign mode coordinates bounded multi-generation optimization over mutable <code>EVOLVE-BLOCK</code> source regions, isolated child <code>LocalRunStore</code> runs, and hardware-verified <code>benchmark-gate.v1</code> receipts. Loopwright maintains a fenced <code>campaign.sqlite</code> Pareto archive and exports signed <code>evolution-bundle.v1</code> packages without delegating verification authority to models.</p>
+<p>For single-run repository automation, follow <a href="/loopwright/0.0/docs/walkthroughs/declarative-taskpack/">Declarative Taskpack</a>
+. For manual out-of-repo controller governance, follow <a href="/loopwright/0.0/docs/walkthroughs/managed-controller/">Managed Controller</a>
+.</p>
+<h2 id="contents">Contents</h2>
+<ul>
+<li><a href="#overview">Overview</a>
+</li>
+<li><a href="#prompt-bootstrap">Prompt bootstrap</a>
+</li>
+<li><a href="#step-1-mark-evolve-blocks">Step 1: Mark evolve blocks</a>
+</li>
+<li><a href="#step-2-author-taskpack">Step 2: Author taskpack</a>
+</li>
+<li><a href="#step-3-author-campaign">Step 3: Author campaign</a>
+</li>
+<li><a href="#step-4-start-runner">Step 4: Start runner</a>
+</li>
+<li><a href="#step-5-run-and-export">Step 5: Run and export</a>
+</li>
+</ul>
+<h2 id="overview">Overview</h2>
+<p><span class="diagram-scroll"><img src="/loopwright/0.0/docs/assets/diagrams/hardware-relay-flow.svg" alt="Hardware relay and outbound worker topology" decoding="async"></span></p>
+<!-- flowchart LR
+  Control["Zone 1: Control Plane (CLI or GitHub Actions, Outbound HTTPS)"] -> DMZ["Zone 2: Relay DMZ (HTTPS Gate, HMAC Auth, Lease Fence, CAS)"] -> Firewall["Cluster Firewall (Zero Inbound Ports)"] -> Worker["Zone 3: Private GPU Cluster (Outbound Pull)"] -> Sandbox["Offline Zero-Network Docker (Stage A Build + Stage B Bench)"] -> Receipt["Signed Verdict Receipt"]
+-->
+<p>Evolutionary campaigns separate candidate authoring from blind hardware evaluation across three zones:</p>
+<table>
+	<thead>
+			<tr>
+					<th>Responsibility</th>
+					<th>Authored files</th>
+					<th>Runtime invariant</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td>Mutable span guard</td>
+					<td><code>EVOLVE-BLOCK</code> markers and <code>evolve-block-guard.v1</code></td>
+					<td>Outside bytes must match baseline SHA-256 exactly</td>
+			</tr>
+			<tr>
+					<td>Hardware contract</td>
+					<td><code>target.matrix[].hardware</code> and <code>benchmark-gate.v1</code></td>
+					<td>Stage A static audit blocks forbidden symbols and excess spills before Stage B</td>
+			</tr>
+			<tr>
+					<td>Blind evaluation</td>
+					<td>Outbound <code>runner relay</code> and <code>runner worker</code></td>
+					<td>Zero inbound GPU cluster ports; Stage B executes offline with read-only holdout data</td>
+			</tr>
+			<tr>
+					<td>Archive and export</td>
+					<td><code>.loopwright/campaign.yaml</code> and <code>loopwright evolve</code></td>
+					<td>Fenced <code>campaign.sqlite</code> outside <code>--repo</code>; <code>evolve export</code> verifies every HMAC receipt</td>
+			</tr>
+	</tbody>
+</table>
+<h2 id="prompt-bootstrap">Prompt bootstrap</h2>
+<p>To configure an evolutionary campaign through an interview-first flow before writing YAML files, paste this prompt into your coding agent inside the target repository:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>text</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-text" data-lang="text"><span class="line"><span class="cl">Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then follow Evolutionary campaign mode (Mode 3) to interview me one question at a time with repository-grounded defaults on EVOLVE-BLOCK guarded files, target hardware cell and Stage A static audit limits, held-out benchmark-gate.v1 workloads and runner relay/worker topology, objectives, island/niche budgets, optional teamEvolution, and bundle export. Wait for my approval on the design summary before generating .loopwright/taskpack.yaml and .loopwright/campaign.yaml and validating with loopwright evolve check.</span></span></code></pre></div>
+</div>
+<h2 id="step-1-mark-evolve-blocks">Step 1: Mark evolve blocks</h2>
+<p>Wrap only the editable spans in guarded source files with matching <code>EVOLVE-BLOCK-START: &lt;id&gt;</code> and <code>EVOLVE-BLOCK-END: &lt;id&gt;</code> comments (<code>//</code>, <code>#</code>, or <code>/* */</code>):</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>cpp</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-cpp" data-lang="cpp"><span class="line"><span class="cl"><span class="n">__global__</span> <span class="kt">void</span> <span class="nf">flash_decode</span><span class="p">(</span><span class="kt">float</span><span class="o">*</span> <span class="n">out</span><span class="p">,</span> <span class="k">const</span> <span class="kt">float</span><span class="o">*</span> <span class="n">q</span><span class="p">,</span> <span class="kt">int</span> <span class="n">n</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">  <span class="c1">// EVOLVE-BLOCK-START: tile_loop
+</span></span></span><span class="line"><span class="cl">  <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="n">threadIdx</span><span class="p">.</span><span class="n">x</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">n</span><span class="p">;</span> <span class="n">i</span> <span class="o">+=</span> <span class="n">blockDim</span><span class="p">.</span><span class="n">x</span><span class="p">)</span> <span class="p">{</span>
+</span></span><span class="line"><span class="cl">    <span class="n">out</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">q</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+</span></span><span class="line"><span class="cl">  <span class="p">}</span>
+</span></span><span class="line"><span class="cl">  <span class="c1">// EVOLVE-BLOCK-END: tile_loop
+</span></span></span><span class="line"><span class="cl"><span class="p">}</span></span></span></code></pre></div>
+</div>
+<p>Keep block IDs unique per file and bounded to printable ASCII. Any byte change outside marked spans fails <code>evolve-block-guard.v1</code> before Loopwright dispatches a hardware benchmark job.</p>
+<h2 id="step-2-author-taskpack">Step 2: Author taskpack</h2>
+<p>Create <code>.loopwright/taskpack.yaml</code> declaring the guarded files, hardware target cell, Stage A static audit ceilings, and <code>benchmark-gate.v1</code> slot. See <a href="/loopwright/0.0/docs/configuration/taskpack/">Taskpack</a>
+ and <a href="/loopwright/0.0/docs/configuration/task-contract/#hardware-target-cells">Task Contract</a>
+ for full field constraints.</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">Taskpack</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">kernel-evolve-tp</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">goal</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">candidate</span><span class="p">:</span><span class="w"> </span><span class="l">Optimize guarded kernel blocks and pass hardware benchmark thresholds.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noChange</span><span class="p">:</span><span class="w"> </span><span class="l">Confirm no further optimization is needed and settle cleanly.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">target</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">matrix</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">cuda-h100-whole</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="l">linux/amd64</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">variant</span><span class="p">:</span><span class="w"> </span><span class="l">cuda12</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">hardware</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">accelerator</span><span class="p">:</span><span class="w"> </span><span class="l">sm_90a</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">isolationMode</span><span class="p">:</span><span class="w"> </span><span class="l">whole_device</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">deviceCount</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">driverConstraint</span><span class="p">:</span><span class="w"> </span><span class="s2">&#34;&gt;=550.0&#34;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">forbiddenSymbolPatterns</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">cublas</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">cudnn</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">maxRegisterCount</span><span class="p">:</span><span class="w"> </span><span class="m">128</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">maxLocalSpillBytes</span><span class="p">:</span><span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">src/kernels/**</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">.loopwright/**</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">scripts/**</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">models</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">openai</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">gpt-5</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">LOOPWRIGHT_PROVIDER_TOKEN</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">roles</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">mutator</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">openai</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">gpt-5</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">purpose</span><span class="p">:</span><span class="w"> </span><span class="l">task</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">read</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">write</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">edit</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l">Edit guarded EVOLVE-BLOCK spans in src/kernels/flash_decode.cu only.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">verification</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">localChecks</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">evolve-guard</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">evolve-block-guard.v1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">files</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">src/kernels/flash_decode.cu</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allowedBlockIds</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">tile_loop</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">maxBlockBytes</span><span class="p">:</span><span class="w"> </span><span class="m">8192</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">externalGates</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">gpu-bench</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">benchmark-gate.v1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">endpointId</span><span class="p">:</span><span class="w"> </span><span class="l">hw-relay</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">gateId</span><span class="p">:</span><span class="w"> </span><span class="l">flash-decode-bench</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">required</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">targetCellId</span><span class="p">:</span><span class="w"> </span><span class="l">cuda-h100-whole</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">heldOutWorkloadId</span><span class="p">:</span><span class="w"> </span><span class="l">decode-bs1-4k</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">metricThresholds</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">bounds</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">metric</span><span class="p">:</span><span class="w"> </span><span class="l">max_ulp</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">max</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">bucketScope</span><span class="p">:</span><span class="w"> </span><span class="l">all_buckets</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">publication</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">disabled</span></span></span></code></pre></div>
+</div>
+<h2 id="step-3-author-campaign">Step 3: Author campaign</h2>
+<p>Create <code>.loopwright/campaign.yaml</code> referencing the taskpack and target hardware cell. See <a href="/loopwright/0.0/docs/configuration/evolution-campaign/">Evolution Campaign</a>
+ for all <code>stages</code>, <code>population</code>, <code>sampling</code>, <code>teamEvolution</code>, and <code>export</code> fields.</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">EvolutionCampaign</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">flash-decode-sm90a</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">taskpack</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">targetCellId</span><span class="p">:</span><span class="w"> </span><span class="l">cuda-h100-whole</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">tracks</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">triton, cute, cuda_raw]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">stages</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">single-target</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">population</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">islands</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">migrationIntervalGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">6</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxMigrationElites</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">nicheAxes</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">bound_pipeline</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">enum</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">values</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">hbm, l2, smem_lds_ub, tensor_cube, vector_valu]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sampling</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noveltyDecayLambda</span><span class="p">:</span><span class="w"> </span><span class="m">1.0</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mutationWeights</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">diff_tune</span><span class="p">:</span><span class="w"> </span><span class="m">0.5</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">full_rewrite</span><span class="p">:</span><span class="w"> </span><span class="m">0.3</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">crossover</span><span class="p">:</span><span class="w"> </span><span class="m">0.2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">modelBandit</span><span class="p">:</span><span class="w"> </span><span class="l">deterministic-round-robin</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxCrossoversPerPrompt</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">objectives</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">metric</span><span class="p">:</span><span class="w"> </span><span class="l">latency_us_p50</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">direction</span><span class="p">:</span><span class="w"> </span><span class="l">minimize</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">metric</span><span class="p">:</span><span class="w"> </span><span class="l">goodput_rps</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">direction</span><span class="p">:</span><span class="w"> </span><span class="l">maximize</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">budgets</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">20</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxEvaluations</span><span class="p">:</span><span class="w"> </span><span class="m">40</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxConcurrentEvaluations</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">scratchpadIntervalGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">export</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">format</span><span class="p">:</span><span class="w"> </span><span class="l">oci-layout</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">outputDir</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright-out/bundles/flash-decode-sm90a</span></span></span></code></pre></div>
+</div>
+<p>Validate both manifests and guarded files offline before starting any worker:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright evolve check --campaign .loopwright/campaign.yaml --repo . --json</span></span></code></pre></div>
+</div>
+<h2 id="step-4-start-runner">Step 4: Start runner</h2>
+<p>Start the relay in a reachable DMZ or loopback host, then start one or more outbound workers on private GPU hosts. Workers poll the relay outbound and execute Stage A and Stage B inside offline sandboxes with zero inbound ports:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright runner relay --config <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/relay.yaml&#34;</span> --json
+</span></span><span class="line"><span class="cl">loopwright runner worker --config <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/worker.yaml&#34;</span> --json</span></span></code></pre></div>
+</div>
+<p>For local offline smoke tests without physical GPUs, configure <code>probeMode: synthetic_fixture</code> on the worker and pass <code>--allow-synthetic-probe</code> to <code>loopwright evolve run</code>. Omit <code>--allow-synthetic-probe</code> on real hardware runs so synthetic receipts fail closed (<code>HARDWARE_PROVENANCE_MISMATCH</code>).</p>
+<h2 id="step-5-run-and-export">Step 5: Run and export</h2>
+<p>Export the required secrets and point <code>--state</code> at a directory strictly outside <code>--repo</code>:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">LOOPWRIGHT_PROVIDER_TOKEN</span><span class="o">=</span><span class="s2">&#34;&lt;provider-token&gt;&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">LOOPWRIGHT_BENCHMARK_GATE_URL</span><span class="o">=</span><span class="s2">&#34;https://relay.example.internal/v1/benchmark/jobs&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">LOOPWRIGHT_GATE_SIGNING_SECRET</span><span class="o">=</span><span class="s2">&#34;&lt;hmac-secret&gt;&#34;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">loopwright evolve run --campaign .loopwright/campaign.yaml --state <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/evo-state/flash-decode&#34;</span> --repo . --json</span></span></code></pre></div>
+</div>
+<p>Monitor progress, pause cleanly on <code>SIGINT</code> (exit <code>130</code>), resume later, and export signed <code>evolution-bundle.v1</code> artifacts:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright evolve status --campaign <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/evo-state/flash-decode&#34;</span> --json
+</span></span><span class="line"><span class="cl">loopwright evolve inspect --campaign <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/evo-state/flash-decode&#34;</span> --island <span class="m">0</span> --json
+</span></span><span class="line"><span class="cl">loopwright evolve resume --campaign <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/evo-state/flash-decode&#34;</span> --repo . --json
+</span></span><span class="line"><span class="cl">loopwright evolve <span class="nb">export</span> --campaign <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/evo-state/flash-decode&#34;</span> --out <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/evo-out/bundle&#34;</span> --format oci-layout --json</span></span></code></pre></div>
+</div>
+<p><code>evolve export</code> verifies every HMAC verdict receipt and CAS blob digest before publishing and fails closed (<code>EXPORT_UNVERIFIED_FORBIDDEN</code>, exit <code>3</code>) when signing secrets are absent or receipts are unverified.</p>
+<nav class="reading-footer" aria-label="Further reading">
+    <section>
+      <h2>See also</h2>
+      <ul class="related-pages"><li><a href="/loopwright/0.0/docs/configuration/evolution-campaign/">Evolution Campaign</a>
+ (complete <code>EvolutionCampaign</code> YAML schema and bundle contract)</li><li><a href="/loopwright/0.0/docs/operations/cli/#evolution-campaigns">CLI</a>
+ (<code>runner</code> and <code>evolve</code> flags, env vars, and exit codes)</li><li><a href="/loopwright/0.0/docs/configuration/taskpack/">Taskpack</a>
+ (<code>evolve-block-guard.v1</code> and <code>benchmark-gate.v1</code> declarations)</li></ul>
+    </section><section class="next-page">
+        <h2>Next</h2>
+        <div><a href="/loopwright/0.0/docs/configuration/evolution-campaign/">Evolution Campaign</a>
+ — review every <code>EvolutionCampaign</code> field, enum, and bundle export bound.</div>
+      </section></nav>
+
+      </article>
+    </main>
+    <aside class="toc-panel" aria-label="Page navigation">
+      <div class="toc-inner">
+        
+          <nav id="TableOfContents">
+  <ul>
+    <li><a href="#contents">Contents</a></li>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#prompt-bootstrap">Prompt bootstrap</a></li>
+    <li><a href="#step-1-mark-evolve-blocks">Step 1: Mark evolve blocks</a></li>
+    <li><a href="#step-2-author-taskpack">Step 2: Author taskpack</a></li>
+    <li><a href="#step-3-author-campaign">Step 3: Author campaign</a></li>
+    <li><a href="#step-4-start-runner">Step 4: Start runner</a></li>
+    <li><a href="#step-5-run-and-export">Step 5: Run and export</a></li>
+  </ul>
+</nav>
+        
+      </div>
+    </aside>
+  </div>
+  <script src="/loopwright/0.0/js/site.cb70edb8dec0dae174f86424d636c297d7ecb595545ba2b405e20dae4f9cceed.js" defer></script>
+</body>
+</html>

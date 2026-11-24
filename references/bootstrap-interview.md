@@ -12,6 +12,7 @@ Use this protocol when a maintainer asks a coding agent to initialize or migrate
 - [Stage 5: Summary gate](#stage-5-summary-gate)
 - [Stage 6: Tiered qualification](#stage-6-tiered-qualification)
 - [Managed Controller mode](#managed-controller-mode)
+- [Evolutionary campaign mode](#evolutionary-campaign-mode)
 
 ## Interview rules
 
@@ -21,15 +22,15 @@ Follow five rules throughout the bootstrap session:
 2. **One question at once**: Ask one focused question per turn and wait for the reply before continuing.
 3. **Propose a default**: Include one `(Recommended)` option grounded in repository evidence on every question.
 4. **Defer all writes**: Never write or modify repository or controller files before Stage 5 summary approval.
-5. **Select operating mode**: Confirm Mode 1 (Declarative Taskpack) or Mode 2 (Managed Controller) in Stage 1.
+5. **Select operating mode**: Confirm Mode 1 (Declarative Taskpack), Mode 2 (Managed Controller), or Mode 3 (Evolutionary Campaign) in Stage 1.
 
 ## Stage 1: Inventory
 
-Scan existing sync scripts, Dockerfiles, dependency manifests (`go.mod`, `package.json`, `pyproject.toml`), Helm charts, version tables, and `.github/workflows/` files before asking questions.
+Scan existing sync scripts, Dockerfiles, dependency manifests (`go.mod`, `package.json`, `pyproject.toml`), Helm charts, version tables, kernel or benchmark build scripts, and `.github/workflows/` files before asking questions.
 
 ### Operating mode selection
 
-Confirm whether the repository needs Mode 1 (`.loopwright/taskpack.yaml` or a multi-domain `TaskpackSuite` under `.auto-sync/suite.yaml` with Action or App) or Mode 2 (out-of-repo `TrustedRegistry` and `ControllerConfig`). When Mode 2 applies, jump to [Managed Controller mode](#managed-controller-mode) after Stage 1.
+Confirm whether the repository needs Mode 1 (`.loopwright/taskpack.yaml` or a multi-domain `TaskpackSuite` under `.auto-sync/suite.yaml` with Action or App), Mode 2 (out-of-repo `TrustedRegistry` and `ControllerConfig`), or Mode 3 (bounded multi-generation optimization via `EvolutionCampaign`, `evolve-block-guard.v1`, and `loopwright evolve`). Jump to [Managed Controller mode](#managed-controller-mode) for Mode 2, or [Evolutionary campaign mode](#evolutionary-campaign-mode) for Mode 3, after Stage 1.
 
 ### Modular domain decomposition
 
@@ -281,6 +282,17 @@ When Stage 1 selects Mode 2, keep `registry.yaml` and `controller.yaml` outside 
 5. Write `TrustedRegistry` (`registry.yaml`), compute its SHA-256, and bind it in `ControllerConfig` (`controller.yaml`) with embedded `TaskContract`.
 6. Qualify locally with `loopwright check --config ... --registry ... --registry-sha256 ... --json` before running `loopwright run` or `loopwright step`.
 
+## Evolutionary campaign mode
+
+When Stage 1 selects Mode 3, keep campaign state (`--state`) strictly outside `--repo` and bind every mutable region to `evolve-block-guard.v1`:
+
+1. Fetch the Mode 3 Markdown guides linked from `llms.txt` (`Evolutionary Campaigns`, `Evolution Campaign`, `Taskpack`, and `CLI`) before authoring schemas.
+2. Confirm guarded `EVOLVE-BLOCK` source files (`allowedBlockIds`, `maxBlockBytes`), hardware `target.matrix` cell (`accelerator`, `isolationMode`, `driverConstraint`, Stage A static audit bounds), and held-out `benchmark-gate.v1` workloads plus `runner relay|worker` topology one question at a time.
+3. Confirm search `stages` (`single-target` or `specialist-then-portfolio`), `population` islands and `nicheAxes`, multi-objective `objectives`, `budgets`, optional read-only `teamEvolution`, `export` format (`dir` or `oci-layout`), and required secrets (`LOOPWRIGHT_PROVIDER_TOKEN`, `LOOPWRIGHT_BENCHMARK_GATE_URL`, `LOOPWRIGHT_GATE_SIGNING_SECRET`).
+4. Confirm the Stage 5 summary table before writing `.loopwright/taskpack.yaml` and `.loopwright/campaign.yaml`.
+5. Validate offline with `loopwright evolve check --campaign .loopwright/campaign.yaml --repo . --json`.
+6. Qualify locally with a loopback `runner relay` + `runner worker` (`probeMode: synthetic_fixture`, `--allow-synthetic-probe`) before running against live physical hardware (`loopwright evolve run|resume|status|inspect|export`).
+
 ---
 
-**See also** — [Declarative Taskpack](../latest/docs/walkthroughs/declarative-taskpack/index.md) (author and run a repository taskpack) · [Taskpack](../latest/docs/configuration/taskpack/index.md) (complete manifest field dictionary) · [GitHub Action](../latest/docs/operations/github-action/index.md) (Action inputs, preflight `source-revision`, and secrets) · [Managed Controller](../latest/docs/walkthroughs/managed-controller/index.md) (out-of-repo `TrustedRegistry` and CLI governance)
+**See also** — [Declarative Taskpack](../latest/docs/walkthroughs/declarative-taskpack/index.md) (author and run a repository taskpack) · [Taskpack](../latest/docs/configuration/taskpack/index.md) (complete manifest field dictionary) · [Evolutionary Campaigns](../latest/docs/walkthroughs/evolutionary-campaigns/index.md) (end-to-end evolutionary campaign setup) · [Evolution Campaign](../latest/docs/configuration/evolution-campaign/index.md) (`EvolutionCampaign` schema and bundle contract) · [GitHub Action](../latest/docs/operations/github-action/index.md) (Action inputs, preflight `source-revision`, and secrets) · [Managed Controller](../latest/docs/walkthroughs/managed-controller/index.md) (out-of-repo `TrustedRegistry` and CLI governance)

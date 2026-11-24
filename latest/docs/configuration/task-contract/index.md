@@ -244,7 +244,7 @@ Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }
 
 Verifier-namespaced descriptors (`.loopwright-verifier/<slotId>/*`) use a dedicated verifier output budget (`64` files per slot, `256` total files, and `16 GiB` total bytes) separate from candidate `budgets.overlay.maxBytes`.
 
-`ArtifactRef` accepts optional `uri` (`<= 2048` chars) and `mediaType` (`<= 128` chars), omitted from canonical serialization when unset. `Evidence` and `EvaluatedCheck` accept optional `metrics` (finite numbers, strings, or booleans), `findings`, and `detail` even on `passed` (`Evidence.spec.reason` stays `null`).
+`ArtifactRef` accepts optional `uri` (`<= 2048` chars) and `mediaType` (`<= 128` chars), omitted from canonical serialization when unset. `Evidence.spec` accepts optional `metrics`, `findings`, `detail`, `bucketMetrics` (`1..64` buckets, `<= 16` numeric metrics and `<= 8` dimensions per bucket), and closed-enum `hardwareDiagnostics` (`boundPipeline`: `hbm | l2 | smem_lds_ub | tensor_cube | vector_valu | host_launch | comm | unknown`, optional counters/percentages/stalls).
 
 ### Acceptance fields
 
@@ -279,16 +279,18 @@ Each `spec.target.matrix[]` cell accepts an optional `hardware` block alongside 
 | `hardware.deviceCount` | No | Safe integer (`1..64`) | Expected device count verified against observed `hardwareProvenance` |
 | `hardware.driverConstraint` | No | Printable string (`1..128`) | Exact driver match or `>=<dotted-version>` minimum version constraint |
 | `hardware.topology` | No | Printable string (`1..128`) | Optional interconnect or device topology constraint |
+| `hardware.forbiddenSymbolPatterns` | No | `0..64` ASCII substrings (`<= 128`) | Glob-free Stage A symbol denylist (`cublas`, `rocblas`, `aclnn`) |
+| `hardware.maxRegisterCount` | No | Safe integer (`>= 0`) | Stage A per-thread register ceiling before Stage B |
+| `hardware.maxLocalSpillBytes` | No | Safe integer (`>= 0`) | Stage A local memory spill ceiling (`STAGE_A_STATIC_AUDIT_FAILED`) |
 
 ### Thresholds and provenance
 
-- **Bounds rules**: `{ kind: 'bounds', metric, min?, max? }` requires at least one finite endpoint (`min <= max`; `-0` normalizes to `0`).
-- **Comparative rules**: `{ kind: 'comparative', metric, baselineMetric, operator, threshold }` supports `min_ratio`, `max_ratio`, and `max_delta` (`baseline > 0` for ratios).
+- **Bounds and comparative rules**: `bounds` requires `{ metric, min?, max? }`; `comparative` requires `{ metric, baselineMetric, operator, threshold }` (`min_ratio`, `max_ratio`, `max_delta`). Both accept optional `bucketScope` (`'aggregate' | 'all_buckets' | { bucketId }`).
 - **Hardware provenance**: Passing `hardware_execution` `Evidence` requires `hardwareProvenance` (`targetCellId`, `probeKind: 'physical' | 'synthetic_fixture'`, `vendor`, `deviceModel`, `accelerator`, `isolationMode`, `deviceCount`, `driverVersion`, `runtimeVersion`, `topology?`, `workloadDigest`, `clockLockMode: 'locked' | 'unlocked' | 'unknown'`).
-- **Independent core check**: `evaluateAcceptance` requires `probeKind: 'physical'` unless `allowSyntheticHardwareProbe` is `true`, and blocks mismatches (`hardware_provenance_mismatch`, `metric_threshold_failed`).
+- **Independent core check**: `evaluateAcceptance` enforces `bucketScope` across `bucketMetrics`, requires `probeKind: 'physical'` unless `allowSyntheticHardwareProbe` is `true`, and blocks mismatches (`hardware_provenance_mismatch`, `metric_threshold_failed`).
 
 ---
 
-**See also** — [Managed Controller](/loopwright/latest/docs/walkthroughs/managed-controller/index.md) (end-to-end CLI setup and relationship diagram) · [Taskpack](/loopwright/latest/docs/configuration/taskpack/index.md) (single-file automated mode)
+**See also** — [Managed Controller](/loopwright/latest/docs/walkthroughs/managed-controller/index.md) (end-to-end CLI setup and relationship diagram) · [Taskpack](/loopwright/latest/docs/configuration/taskpack/index.md) (single-file automated mode) · [Evolution Campaign](/loopwright/latest/docs/configuration/evolution-campaign/index.md) (multi-generation search, islands, and bundle export schema)
 
 **Next** → [Controller and Registry](/loopwright/latest/docs/configuration/controller-and-registry/index.md) — bind `TaskContract` roles, steps, and credentials in `TrustedRegistry` and `ControllerConfig`.

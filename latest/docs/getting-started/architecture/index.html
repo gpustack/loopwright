@@ -21,8 +21,8 @@
   
   
   
-  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/latest/images/logo_hu_ef169d6c363295df.3b907f6ddb897e188ca8c4f5e172ccdde55f4d2c25ccc092666ccd2e59111856.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/latest/images/logo_hu_90b015dd418204d9.f7018fba3843b4b28ddbafa2b3cd566eb4bd2c3636a8667504765088a2795aca.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/latest/images/logo_hu_aebf313dad664680.8dfcd6a6909d121a4f4e9cf40b298600526e7e60b350f40eb0d9443367dc9c57.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/latest/images/logo_hu_26148784bb4e8d8b.20009204f8ce0c077de9b006b9be7537900b67ab2b44849722ca06e453bf5e17.png">
   
   <title>Architecture · Loopwright</title>
   
@@ -36,7 +36,7 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="topbar">
     
-    <a class="brand" href="/loopwright/latest/" aria-label="Loopwright home"><img src="/loopwright/latest/images/logo_hu_72b2e0d8fb22ffa2.7aa7cfbf568b33218252ff52c4e3788a7be1904dd5fe995594694f6baba85490.png" width="30" height="30" alt=""><span>Loopwright</span></a>
+    <a class="brand" href="/loopwright/latest/" aria-label="Loopwright home"><img src="/loopwright/latest/images/logo_hu_3ef7981c6e36e22.3a67bde1a9653790083e7482a4a417861ea9497865dd094c4e16ab87c63ec05b.png" width="30" height="30" alt=""><span>Loopwright</span></a>
     <nav class="top-links" aria-label="Main navigation">
       <a class="top-github-link" href="https://github.com/gpustack/loopwright" aria-label="GitHub repository">
         <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
@@ -236,6 +236,11 @@
       
     
   
+    
+    
+      
+    
+  
 
 
 <details class="nav-section" >
@@ -255,6 +260,12 @@
           <a title="Managed Controller" href="/loopwright/latest/docs/walkthroughs/managed-controller/" >Managed Controller</a>
         
       
+        
+        
+          
+          <a title="Evolutionary Campaigns" href="/loopwright/latest/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+        
+      
     
   </div>
 </details>
@@ -268,6 +279,11 @@
 
 
 
+  
+    
+    
+      
+    
   
     
     
@@ -331,6 +347,12 @@
           <a title="Decision Routing" href="/loopwright/latest/docs/configuration/decision-routing/" >Decision Routing</a>
         
       
+        
+        
+          
+          <a title="Evolution Campaign" href="/loopwright/latest/docs/configuration/evolution-campaign/" >Evolution Campaign</a>
+        
+      
     
   </div>
 </details>
@@ -377,161 +399,168 @@
 <li><strong>Publish &amp; Remember</strong>: Settle pull request publication and propose reviewed memory separately.</li>
 </ol>
 <h2 id="operating-modes">Operating modes</h2>
-<p>Loopwright supports two distinct configuration and execution modes sharing one verification kernel:</p>
+<p>Loopwright supports two single-run modes sharing one verification kernel, plus bounded multi-generation evolution (<code>@loopwright/evolution</code>) over isolated child <code>LocalRunStore</code> runs:</p>
 <table>
-  <thead>
-      <tr>
-          <th>Dimension</th>
-          <th>Declarative taskpack</th>
-          <th>Managed controller</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td>Target user</td>
-          <td>Repository maintainers and local CLI users</td>
-          <td>Platform and security operators</td>
-      </tr>
-      <tr>
-          <td>Files authored</td>
-          <td>One <code>.loopwright/taskpack.yaml</code> in repo</td>
-          <td>Out-of-repo <code>registry.yaml</code> and <code>controller.yaml</code></td>
-      </tr>
-      <tr>
-          <td>Digest pinning</td>
-          <td>Compiled automatically by host</td>
-          <td>Pinned manually via SHA-256 (<code>--registry-sha256</code>)</td>
-      </tr>
-      <tr>
-          <td>Execution graph</td>
-          <td>Single compiled author + check pipeline</td>
-          <td>Custom multi-step <code>agent</code> and <code>check</code> DAG</td>
-      </tr>
-      <tr>
-          <td>Credential wiring</td>
-          <td>Mapped from local CLI, Action, or App environment</td>
-          <td>Explicit <code>credentialBindings</code> and path templates</td>
-      </tr>
-      <tr>
-          <td>Key advantage</td>
-          <td>Zero boilerplate; local CLI or GitHub automation</td>
-          <td>Duty separation, custom gates/MCP, local CLI control</td>
-      </tr>
-      <tr>
-          <td>Walkthrough</td>
-          <td><a href="/loopwright/latest/docs/walkthroughs/declarative-taskpack/">Declarative Taskpack</a>
+	<thead>
+			<tr>
+					<th>Dimension</th>
+					<th>Declarative taskpack</th>
+					<th>Managed controller</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td>Target user</td>
+					<td>Repository maintainers and local CLI users</td>
+					<td>Platform and security operators</td>
+			</tr>
+			<tr>
+					<td>Files authored</td>
+					<td>One <code>.loopwright/taskpack.yaml</code> in repo</td>
+					<td>Out-of-repo <code>registry.yaml</code> and <code>controller.yaml</code></td>
+			</tr>
+			<tr>
+					<td>Digest pinning</td>
+					<td>Compiled automatically by host</td>
+					<td>Pinned manually via SHA-256 (<code>--registry-sha256</code>)</td>
+			</tr>
+			<tr>
+					<td>Execution graph</td>
+					<td>Single compiled author + check pipeline</td>
+					<td>Custom multi-step <code>agent</code> and <code>check</code> DAG</td>
+			</tr>
+			<tr>
+					<td>Credential wiring</td>
+					<td>Mapped from local CLI, Action, or App environment</td>
+					<td>Explicit <code>credentialBindings</code> and path templates</td>
+			</tr>
+			<tr>
+					<td>Key advantage</td>
+					<td>Zero boilerplate; local CLI or GitHub automation</td>
+					<td>Duty separation, custom gates/MCP, local CLI control</td>
+			</tr>
+			<tr>
+					<td>Walkthrough</td>
+					<td><a href="/loopwright/latest/docs/walkthroughs/declarative-taskpack/">Declarative Taskpack</a>
 </td>
-          <td><a href="/loopwright/latest/docs/walkthroughs/managed-controller/">Managed Controller</a>
+					<td><a href="/loopwright/latest/docs/walkthroughs/managed-controller/">Managed Controller</a>
 </td>
-      </tr>
-  </tbody>
+			</tr>
+	</tbody>
 </table>
 <h2 id="configuration-surfaces">Configuration surfaces</h2>
 <p>Every Loopwright document uses <code>apiVersion: loopwright.dev/v1alpha1</code> across declarative and managed configuration surfaces:</p>
 <table>
-  <thead>
-      <tr>
-          <th>Mode or scope</th>
-          <th>Document <code>kind</code></th>
-          <th>Top-level keys</th>
-          <th>Reference guide</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td>Declarative mode</td>
-          <td><code>Taskpack</code></td>
-          <td><code>apiVersion</code>, <code>kind</code>, <code>metadata.name</code>, <code>spec</code></td>
-          <td><a href="/loopwright/latest/docs/configuration/taskpack/">Taskpack</a>
+	<thead>
+			<tr>
+					<th>Mode or scope</th>
+					<th>Document <code>kind</code></th>
+					<th>Top-level keys</th>
+					<th>Reference guide</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td>Declarative mode</td>
+					<td><code>Taskpack</code></td>
+					<td><code>apiVersion</code>, <code>kind</code>, <code>metadata.name</code>, <code>spec</code></td>
+					<td><a href="/loopwright/latest/docs/configuration/taskpack/">Taskpack</a>
 </td>
-      </tr>
-      <tr>
-          <td>Managed mode</td>
-          <td><code>TrustedRegistry</code></td>
-          <td><code>apiVersion</code>, <code>kind</code>, <code>metadata.name</code>, <code>spec</code></td>
-          <td><a href="/loopwright/latest/docs/configuration/controller-and-registry/">Controller and Registry</a>
+			</tr>
+			<tr>
+					<td>Managed mode</td>
+					<td><code>TrustedRegistry</code></td>
+					<td><code>apiVersion</code>, <code>kind</code>, <code>metadata.name</code>, <code>spec</code></td>
+					<td><a href="/loopwright/latest/docs/configuration/controller-and-registry/">Controller and Registry</a>
 </td>
-      </tr>
-      <tr>
-          <td>Managed mode</td>
-          <td><code>ControllerConfig</code></td>
-          <td><code>apiVersion</code>, <code>kind</code>, <code>spec</code></td>
-          <td><a href="/loopwright/latest/docs/configuration/controller-and-registry/">Controller and Registry</a>
+			</tr>
+			<tr>
+					<td>Managed mode</td>
+					<td><code>ControllerConfig</code></td>
+					<td><code>apiVersion</code>, <code>kind</code>, <code>spec</code></td>
+					<td><a href="/loopwright/latest/docs/configuration/controller-and-registry/">Controller and Registry</a>
 </td>
-      </tr>
-      <tr>
-          <td>Managed mode</td>
-          <td><code>TaskContract</code></td>
-          <td><code>apiVersion</code>, <code>kind</code>, <code>spec</code></td>
-          <td><a href="/loopwright/latest/docs/configuration/task-contract/">Task Contract</a>
+			</tr>
+			<tr>
+					<td>Managed mode</td>
+					<td><code>TaskContract</code></td>
+					<td><code>apiVersion</code>, <code>kind</code>, <code>spec</code></td>
+					<td><a href="/loopwright/latest/docs/configuration/task-contract/">Task Contract</a>
 </td>
-      </tr>
-      <tr>
-          <td>Shared policy</td>
-          <td><code>spec.sandbox</code></td>
-          <td>Nested under <code>Taskpack.spec</code></td>
-          <td><a href="/loopwright/latest/docs/configuration/sandbox-backends/">Sandbox Backends</a>
+			</tr>
+			<tr>
+					<td>Shared policy</td>
+					<td><code>spec.sandbox</code></td>
+					<td>Nested under <code>Taskpack.spec</code></td>
+					<td><a href="/loopwright/latest/docs/configuration/sandbox-backends/">Sandbox Backends</a>
 </td>
-      </tr>
-      <tr>
-          <td>Shared policy</td>
-          <td><code>DecisionPolicy</code></td>
-          <td><code>apiVersion</code>, <code>kind</code>, <code>spec</code></td>
-          <td><a href="/loopwright/latest/docs/configuration/decision-routing/">Decision Routing</a>
+			</tr>
+			<tr>
+					<td>Shared policy</td>
+					<td><code>DecisionPolicy</code></td>
+					<td><code>apiVersion</code>, <code>kind</code>, <code>spec</code></td>
+					<td><a href="/loopwright/latest/docs/configuration/decision-routing/">Decision Routing</a>
 </td>
-      </tr>
-      <tr>
-          <td>Entry points</td>
-          <td>Action or <code>GitHubAppConfig</code></td>
-          <td>Workflow or <code>apiVersion</code>, <code>kind</code>, <code>spec</code></td>
-          <td><a href="/loopwright/latest/docs/operations/github-action/">GitHub Action</a>
+			</tr>
+			<tr>
+					<td>Evolution mode</td>
+					<td><code>EvolutionCampaign</code></td>
+					<td><code>apiVersion</code>, <code>kind</code>, <code>metadata.name</code>, <code>spec</code></td>
+					<td><a href="/loopwright/latest/docs/configuration/evolution-campaign/">Evolution Campaign</a>
+</td>
+			</tr>
+			<tr>
+					<td>Entry points</td>
+					<td>Action or <code>GitHubAppConfig</code></td>
+					<td>Workflow or <code>apiVersion</code>, <code>kind</code>, <code>spec</code></td>
+					<td><a href="/loopwright/latest/docs/operations/github-action/">GitHub Action</a>
  · <a href="/loopwright/latest/docs/operations/github-app/">GitHub App</a>
 </td>
-      </tr>
-  </tbody>
+			</tr>
+	</tbody>
 </table>
 <h2 id="runtime-baseline">Runtime baseline</h2>
 <p>Deployment host qualification (<code>qualifyDeploymentHostProfile</code>) enforces these baseline prerequisites across Action, App, and CLI surfaces:</p>
 <table>
-  <thead>
-      <tr>
-          <th>Component</th>
-          <th>Baseline requirement</th>
-          <th>Enforcement scope</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td>Node runtime</td>
-          <td>Node.js <code>26.x</code> (built-in <code>node:sqlite</code>)</td>
-          <td>Required across Action, App, CLI, and workspace builds (<code>gpustack/loopwright</code> provisions it automatically)</td>
-      </tr>
-      <tr>
-          <td>Package manager</td>
-          <td><code>npm 11.x</code></td>
-          <td>Workspace dependency installation and builds</td>
-      </tr>
-      <tr>
-          <td>Host platform</td>
-          <td><code>darwin/arm64</code>, <code>linux/arm64</code>, <code>linux/x64</code></td>
-          <td>Unlisted OS or architecture targets fail closed</td>
-      </tr>
-      <tr>
-          <td>Storage and clock</td>
-          <td>Local POSIX filesystem; <code>&lt;= 1000 ms</code> clock drift</td>
-          <td>Network mounts (<code>nfs</code>, <code>smb</code>, <code>fuse</code>, <code>sshfs</code>) and clock jumps fail closed</td>
-      </tr>
-      <tr>
-          <td>Sandbox backend</td>
-          <td>Seatbelt, bubblewrap, Landlock, or Docker</td>
-          <td>Negotiated against taskpack <code>spec.sandbox</code> policy</td>
-      </tr>
-      <tr>
-          <td>Optional tools</td>
-          <td>Python <code>3.11+</code> (runner bridge); Hugo extended <code>0.152.2+</code> (docs site)</td>
-          <td>Needed only when exercising runner helpers or building <code>site/</code></td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Component</th>
+					<th>Baseline requirement</th>
+					<th>Enforcement scope</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td>Node runtime</td>
+					<td>Node.js <code>26.x</code> (built-in <code>node:sqlite</code>)</td>
+					<td>Required across Action, App, CLI, and workspace builds (<code>gpustack/loopwright</code> provisions it automatically)</td>
+			</tr>
+			<tr>
+					<td>Package manager</td>
+					<td><code>npm 11.x</code></td>
+					<td>Workspace dependency installation and builds</td>
+			</tr>
+			<tr>
+					<td>Host platform</td>
+					<td><code>darwin/arm64</code>, <code>linux/arm64</code>, <code>linux/x64</code></td>
+					<td>Unlisted OS or architecture targets fail closed</td>
+			</tr>
+			<tr>
+					<td>Storage and clock</td>
+					<td>Local POSIX filesystem; <code>&lt;= 1000 ms</code> clock drift</td>
+					<td>Network mounts (<code>nfs</code>, <code>smb</code>, <code>fuse</code>, <code>sshfs</code>) and clock jumps fail closed</td>
+			</tr>
+			<tr>
+					<td>Sandbox backend</td>
+					<td>Seatbelt, bubblewrap, Landlock, or Docker</td>
+					<td>Negotiated against taskpack <code>spec.sandbox</code> policy</td>
+			</tr>
+			<tr>
+					<td>Optional tools</td>
+					<td>Python <code>3.11+</code> (runner bridge); Hugo extended <code>0.170.1+</code> (docs site)</td>
+					<td>Needed only when exercising runner helpers or building <code>site/</code></td>
+			</tr>
+	</tbody>
 </table>
 <h2 id="trust-boundaries">Trust boundaries</h2>
 <p>Trusted hosts bind credentials, runtimes, handlers, and external services. Taskpacks and model output cannot grant authority. Local runs enforce neutral <code>.git</code> and <code>&lt;controlRoot&gt;</code> protection while GitHub entrypoints enforce triggers, PR publication, and <code>.github/workflows/**</code> dual-key locks.</p>

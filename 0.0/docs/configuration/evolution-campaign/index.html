@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <script>
+    (() => {
+      try {
+        const theme = localStorage.getItem("theme");
+        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.themeChoice = theme === "light" || theme === "dark" ? theme : "system";
+        if (localStorage.getItem("sidebar-collapsed") === "true") {
+          document.documentElement.dataset.sidebarCollapsed = "true";
+        }
+      } catch {
+        document.documentElement.dataset.themeChoice = "system";
+      }
+    })();
+  </script>
+  
+  
+  
+  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/0.0/images/logo_hu_aebf313dad664680.8dfcd6a6909d121a4f4e9cf40b298600526e7e60b350f40eb0d9443367dc9c57.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/0.0/images/logo_hu_26148784bb4e8d8b.20009204f8ce0c077de9b006b9be7537900b67ab2b44849722ca06e453bf5e17.png">
+  
+  <title>Evolution Campaign · Loopwright</title>
+  
+  <link rel="alternate" type="text/markdown" href="/loopwright/0.0/docs/configuration/evolution-campaign/index.md">
+  
+  <link rel="describedby" href="/loopwright/0.0/llms.txt">
+  <link rel="stylesheet" href="/loopwright/0.0/css/site.ec048c8ebf1c3f4c4d6f42d0df85a7beafbf4d566f1c8eedf65c01f3969b3500.css">
+  <link rel="stylesheet" href="/loopwright/0.0/css/code.d2570c1cc6480f9c62bc31ec538eef2578ce80980588c469638a5f95416bfc7b.css">
+</head>
+<body class="docs-page">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header class="topbar">
+    
+    <a class="brand" href="/loopwright/0.0/" aria-label="Loopwright home"><img src="/loopwright/0.0/images/logo_hu_3ef7981c6e36e22.3a67bde1a9653790083e7482a4a417861ea9497865dd094c4e16ab87c63ec05b.png" width="30" height="30" alt=""><span>Loopwright</span></a>
+    <nav class="top-links" aria-label="Main navigation">
+      <a class="top-github-link" href="https://github.com/gpustack/loopwright" aria-label="GitHub repository">
+        <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
+        <span>GitHub</span>
+      </a>
+      
+  
+  <details class="picker version-picker" id="version-picker"
+    data-root="https://docs.gpustack.ai/loopwright/" data-version="0.0"
+    data-release-kind="stable"
+    data-home="/loopwright/0.0/" data-page="/loopwright/0.0/docs/configuration/evolution-campaign/">
+    <summary>
+      <svg class="picker-icon" aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>
+      <span class="visually-hidden">Documentation version: </span><span class="picker-value">0.0</span>
+      <svg class="picker-caret" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>
+    </summary>
+    <div class="picker-panel">
+      <span class="picker-row is-current" aria-current="true">0.0</span>
+      <p class="picker-note">Enable JavaScript to list other versions.</p>
+    </div>
+  </details>
+  <span id="version-status" class="visually-hidden" role="status"></span>
+
+
+<details class="picker theme-picker">
+  <summary>
+    <span class="theme-icons" aria-hidden="true">
+      <svg class="theme-icon theme-icon-light" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8Zm0-1.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.061 1.06a.749.749 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-9.193 9.193a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 1 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.749.749 0 1 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.061Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 1 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Z"/></svg>
+      <svg class="theme-icon theme-icon-dark" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/></svg>
+      <svg class="theme-icon theme-icon-system" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.75 2h12.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 14.25 13H8.75v2h1.5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1 0-1.5h1.5v-2H1.75A1.75 1.75 0 0 1 0 11.25v-7.5C0 2.784.784 2 1.75 2Zm0 1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+    </span>
+    <span class="visually-hidden">Theme</span>
+    <svg class="picker-caret" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>
+  </summary>
+  <div class="picker-panel">
+    <button class="picker-row theme-row" type="button" data-theme-choice="light">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8Zm0-1.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.061 1.06a.749.749 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-9.193 9.193a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 1 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.749.749 0 1 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.061Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 1 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Z"/></svg>
+      <span>Light</span>
+    </button>
+    <button class="picker-row theme-row" type="button" data-theme-choice="dark">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/></svg>
+      <span>Dark</span>
+    </button>
+    <button class="picker-row theme-row" type="button" data-theme-choice="system" aria-current="true">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.75 2h12.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 14.25 13H8.75v2h1.5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1 0-1.5h1.5v-2H1.75A1.75 1.75 0 0 1 0 11.25v-7.5C0 2.784.784 2 1.75 2Zm0 1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+      <span>System</span>
+    </button>
+  </div>
+</details>
+
+      <form class="top-search" role="search" action="/loopwright/0.0/search/" method="get">
+        <label class="visually-hidden" for="top-query">Search documentation</label>
+        <input id="top-query" name="q" type="search" placeholder="Search docs" autocomplete="off" spellcheck="false">
+        <button type="submit" aria-label="Search"><svg aria-hidden="true" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg></button>
+      </form>
+    </nav>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" aria-label="Documentation navigation">
+      <button class="nav-toggle" type="button" aria-controls="docs-navigation" aria-expanded="false">Browse documentation</button>
+      <button class="sidebar-toggle" type="button" aria-controls="docs-navigation" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
+        <svg class="sidebar-toggle-icon" aria-hidden="true" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2.5" width="12" height="11" rx="2"/>
+          <line x1="6" y1="2.5" x2="6" y2="13.5"/>
+          <polyline class="sidebar-icon-arrow" points="10.5 6 8.5 8 10.5 10"/>
+        </svg>
+      </button>
+      <nav id="docs-navigation" class="sidebar-inner">
+        <a class="nav-home" href="/loopwright/0.0/" >Overview</a>
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Getting Started</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Architecture" href="/loopwright/0.0/docs/getting-started/architecture/" >Architecture</a>
+        
+      
+        
+        
+          
+          <a title="Installation" href="/loopwright/0.0/docs/getting-started/installation/" >Installation</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Operations</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="GitHub Action" href="/loopwright/0.0/docs/operations/github-action/" >GitHub Action</a>
+        
+      
+        
+        
+          
+          <a title="GitHub App" href="/loopwright/0.0/docs/operations/github-app/" >GitHub App</a>
+        
+      
+        
+        
+          
+          <a title="CLI" href="/loopwright/0.0/docs/operations/cli/" >CLI</a>
+        
+      
+        
+        
+          
+          <a title="Coding Agents" href="/loopwright/0.0/docs/operations/coding-agents/" >Coding Agents</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Walkthroughs</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Declarative Taskpack" href="/loopwright/0.0/docs/walkthroughs/declarative-taskpack/" >Declarative Taskpack</a>
+        
+      
+        
+        
+          
+          <a title="Managed Controller" href="/loopwright/0.0/docs/walkthroughs/managed-controller/" >Managed Controller</a>
+        
+      
+        
+        
+          
+          <a title="Evolutionary Campaigns" href="/loopwright/0.0/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+        
+      
+    
+  
+
+
+<details class="nav-section" open>
+  <summary>Configuration</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Taskpack" href="/loopwright/0.0/docs/configuration/taskpack/" >Taskpack</a>
+        
+      
+        
+        
+          
+          <a title="Task Contract" href="/loopwright/0.0/docs/configuration/task-contract/" >Task Contract</a>
+        
+      
+        
+        
+          
+          <a title="Controller and Registry" href="/loopwright/0.0/docs/configuration/controller-and-registry/" >Controller and Registry</a>
+        
+      
+        
+        
+          
+          <a title="Sandbox Backends" href="/loopwright/0.0/docs/configuration/sandbox-backends/" >Sandbox Backends</a>
+        
+      
+        
+        
+          
+          <a title="Decision Routing" href="/loopwright/0.0/docs/configuration/decision-routing/" >Decision Routing</a>
+        
+      
+        
+        
+          
+          <a title="Evolution Campaign" href="/loopwright/0.0/docs/configuration/evolution-campaign/" aria-current="page">Evolution Campaign</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+      </nav>
+    </aside>
+    <main id="main-content">
+      
+      <div class="breadcrumbs">
+        <a href="/loopwright/0.0/docs/">Docs</a><span aria-hidden="true">/</span>
+        
+          
+        
+        <span aria-current="page">Evolution Campaign</span>
+      </div>
+      
+      <article>
+        
+  <h1 id="evolution-campaign">Evolution Campaign</h1>
+<p><code>EvolutionCampaign</code> (<code>&lt;= 64 KiB</code>) defines a bounded multi-generation search over a repository <code>Taskpack</code>, an isolated <code>campaign.sqlite</code> Pareto archive, and signed <code>evolution-bundle.v1</code> exports. Loopwright binds each candidate to an isolated child <code>LocalRunStore</code> and never lets models self-certify hardware results.</p>
+<p>For an end-to-end setup walkthrough, follow <a href="/loopwright/0.0/docs/walkthroughs/evolutionary-campaigns/">Evolutionary Campaigns</a>
+. For <code>TaskContract</code> hardware target cells and threshold rules, see <a href="/loopwright/0.0/docs/configuration/task-contract/#hardware-target-cells">Task Contract</a>
+.</p>
+<h2 id="contents">Contents</h2>
+<ul>
+<li><a href="#evolutioncampaign">EvolutionCampaign</a>
+</li>
+<li><a href="#stages-and-population">Stages and population</a>
+</li>
+<li><a href="#sampling-and-objectives">Sampling and objectives</a>
+</li>
+<li><a href="#plateau-team-evolution">Plateau team evolution</a>
+</li>
+<li><a href="#bundle-export-contract">Bundle export contract</a>
+</li>
+</ul>
+<h2 id="evolutioncampaign">EvolutionCampaign</h2>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">EvolutionCampaign</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">flash-decode-sm90a</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">taskpack</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">targetCellId</span><span class="p">:</span><span class="w"> </span><span class="l">cuda-h100-whole</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">tracks</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">triton, cute, cuda_raw]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">stages</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">specialist-then-portfolio</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">specialistBuckets</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">bs1-isl4k</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">heldOutWorkloadId</span><span class="p">:</span><span class="w"> </span><span class="l">decode-bs1-4k</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">bs16-isl8k</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">heldOutWorkloadId</span><span class="p">:</span><span class="w"> </span><span class="l">decode-bs16-8k</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">portfolioHeldOutWorkloadId</span><span class="p">:</span><span class="w"> </span><span class="l">decode-portfolio-holdout</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">population</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">islands</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">migrationIntervalGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">8</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxMigrationElites</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">nicheAxes</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">bound_pipeline</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">enum</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">values</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">hbm, l2, smem_lds_ub, tensor_cube, vector_valu]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">occupancy_band</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">numeric_bins</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">edges</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="m">0</span><span class="p">,</span><span class="w"> </span><span class="m">25</span><span class="p">,</span><span class="w"> </span><span class="m">50</span><span class="p">,</span><span class="w"> </span><span class="m">75</span><span class="p">,</span><span class="w"> </span><span class="m">100</span><span class="p">]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sampling</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noveltyDecayLambda</span><span class="p">:</span><span class="w"> </span><span class="m">1.0</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mutationWeights</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">diff_tune</span><span class="p">:</span><span class="w"> </span><span class="m">0.5</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">full_rewrite</span><span class="p">:</span><span class="w"> </span><span class="m">0.3</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">crossover</span><span class="p">:</span><span class="w"> </span><span class="m">0.2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">modelBandit</span><span class="p">:</span><span class="w"> </span><span class="l">ucb1</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxCrossoversPerPrompt</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">teamEvolution</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">supervisorRoleId</span><span class="p">:</span><span class="w"> </span><span class="l">supervisor</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">allowedArchetypeRoles</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">probe-readonly, mutator-sandboxed, reviewer]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">stallGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">minHypervolumeDelta</span><span class="p">:</span><span class="w"> </span><span class="m">0.001</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">triggerOnRunEvalPathology</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">trialGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxTeamSize</span><span class="p">:</span><span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxTeamSteps</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">objectives</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">metric</span><span class="p">:</span><span class="w"> </span><span class="l">latency_us_p50</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">direction</span><span class="p">:</span><span class="w"> </span><span class="l">minimize</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">metric</span><span class="p">:</span><span class="w"> </span><span class="l">goodput_rps</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">direction</span><span class="p">:</span><span class="w"> </span><span class="l">maximize</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">budgets</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">40</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxEvaluations</span><span class="p">:</span><span class="w"> </span><span class="m">160</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxConcurrentEvaluations</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">targetRooflineHeadroom</span><span class="p">:</span><span class="w"> </span><span class="m">1.08</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">scratchpadIntervalGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">export</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">format</span><span class="p">:</span><span class="w"> </span><span class="l">oci-layout</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">outputDir</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright-out/bundles/flash-decode-sm90a</span></span></span></code></pre></div>
+</div>
+<h2 id="stages-and-population">Stages and population</h2>
+<p>Campaigns optimize either one target workload (<code>single-target</code>) or bucket-specialized kernels merged into a verified dispatcher (<code>specialist-then-portfolio</code>):</p>
+<ul>
+<li><strong>Taskpack and cell binding</strong>: <code>spec.taskpack</code> must point to a repository taskpack whose <code>target.matrix</code> declares <code>spec.targetCellId</code>.</li>
+<li><strong>Holdout isolation</strong>: In <code>specialist-then-portfolio</code>, <code>portfolioHeldOutWorkloadId</code> must differ from every specialist bucket <code>heldOutWorkloadId</code> and never enters specialist prompts.</li>
+<li><strong>Ring-topology islands</strong>: Islands maintain independent MAP-Elites archives and migrate rank-1 elites clockwise every <code>migrationIntervalGenerations</code>.</li>
+<li><strong>Niche projection</strong>: Each <code>nicheAxes[]</code> entry maps a metric or hardware diagnostic key into discrete MAP-Elites cells.</li>
+</ul>
+<table>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Bounds and defaults</th>
+					<th>Behavior</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>spec.taskpack</code></td>
+					<td>Yes</td>
+					<td>Relative repo path</td>
+					<td>Taskpack manifest compiled for every child run</td>
+			</tr>
+			<tr>
+					<td><code>spec.targetCellId</code></td>
+					<td>Yes</td>
+					<td>Identifier (<code>1..64</code>)</td>
+					<td>Hardware cell ID matched against <code>taskpack</code> <code>target.matrix</code></td>
+			</tr>
+			<tr>
+					<td><code>spec.heldOutWorkloadId</code></td>
+					<td>No</td>
+					<td>Identifier (<code>1..64</code>)</td>
+					<td>Optional workload override for <code>single-target</code> mode</td>
+			</tr>
+			<tr>
+					<td><code>spec.tracks</code></td>
+					<td>No</td>
+					<td><code>1..32</code> unique IDs</td>
+					<td>Candidate implementation tracks (<code>triton</code>, <code>cute</code>, <code>cuda_raw</code>)</td>
+			</tr>
+			<tr>
+					<td><code>spec.stages.mode</code></td>
+					<td>No</td>
+					<td><code>single-target</code> (default) | <code>specialist-then-portfolio</code></td>
+					<td>Selects single workload search or specialist plus portfolio synthesis</td>
+			</tr>
+			<tr>
+					<td><code>stages.specialistBuckets</code></td>
+					<td>No</td>
+					<td><code>1..64</code> <code>{ id, heldOutWorkloadId }</code></td>
+					<td>Required when <code>mode</code> is <code>specialist-then-portfolio</code></td>
+			</tr>
+			<tr>
+					<td><code>stages.portfolioHeldOutWorkloadId</code></td>
+					<td>No</td>
+					<td>Identifier (<code>1..64</code>)</td>
+					<td>Holdout workload certifying final portfolio dispatch</td>
+			</tr>
+			<tr>
+					<td><code>spec.population.islands</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>1..16</code>)</td>
+					<td>Number of isolated ring-topology evolution islands</td>
+			</tr>
+			<tr>
+					<td><code>population.migrationIntervalGenerations</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>1..1024</code>)</td>
+					<td>Generation cadence between clockwise elite migrations</td>
+			</tr>
+			<tr>
+					<td><code>population.maxMigrationElites</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>0..16</code>)</td>
+					<td>Maximum rank-1 elites migrated per island step</td>
+			</tr>
+			<tr>
+					<td><code>population.nicheAxes[]</code></td>
+					<td>Yes</td>
+					<td><code>1..4</code> axes (<code>enum</code> | <code>numeric_bins</code>)</td>
+					<td><code>enum</code>: <code>1..32</code> values; <code>numeric_bins</code>: <code>2..32</code> sorted edges; optional <code>field</code></td>
+			</tr>
+	</tbody>
+</table>
+<h2 id="sampling-and-objectives">Sampling and objectives</h2>
+<p>Loopwright selects parents with novelty decay, screens clones before hardware dispatch, and ranks passing candidates via NSGA-II:</p>
+<ul>
+<li><strong>Pre-dispatch novelty gate</strong>: Normalized token-shingle clones (<code>Jaccard === 1.0</code>) fail fast with <code>NOVELTY_CLONE_REJECTED</code> and zero hardware calls.</li>
+<li><strong>Advisory System-One nodes</strong>: Optional novelty, strategy, and cascade nodes (<code>@loopwright/decisions</code>) advise sampling and never certify verification.</li>
+<li><strong>Preemption accounting</strong>: Hardware <code>BENCHMARK_PREEMPTED</code> outcomes never consume <code>maxEvaluations</code> and never poison bandit rewards.</li>
+<li><strong>Roofline early stop</strong>: Optional <code>targetRooflineHeadroom</code> stops search once observed hardware headroom reaches the declared bound.</li>
+</ul>
+<table>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Bounds and defaults</th>
+					<th>Behavior</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>sampling.noveltyDecayLambda</code></td>
+					<td>Yes</td>
+					<td>Finite number in <code>(0, 100]</code></td>
+					<td>Exponential decay weighting parent offspring counts</td>
+			</tr>
+			<tr>
+					<td><code>sampling.mutationWeights</code></td>
+					<td>Yes</td>
+					<td><code>diff_tune</code>, <code>full_rewrite</code>, <code>crossover</code> in <code>[0, 1000]</code></td>
+					<td>Deterministic per-slot operator selection (sum <code>&gt; 0</code>)</td>
+			</tr>
+			<tr>
+					<td><code>sampling.modelBandit</code></td>
+					<td>No</td>
+					<td><code>deterministic-round-robin</code> (default) | <code>ucb1</code></td>
+					<td>Model pool routing across declared <code>taskpack</code> models</td>
+			</tr>
+			<tr>
+					<td><code>sampling.maxCrossoversPerPrompt</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>0..4</code>)</td>
+					<td>Maximum staged parent JSON snapshots per child prompt</td>
+			</tr>
+			<tr>
+					<td><code>spec.objectives[]</code></td>
+					<td>Yes</td>
+					<td><code>1..8</code> unique <code>{ metric, direction }</code></td>
+					<td><code>minimize</code> or <code>maximize</code> metrics for NSGA-II Pareto ranking</td>
+			</tr>
+			<tr>
+					<td><code>budgets.maxGenerations</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>1..10000</code>)</td>
+					<td>Maximum campaign generations across active stages</td>
+			</tr>
+			<tr>
+					<td><code>budgets.maxEvaluations</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>1..100000</code>)</td>
+					<td>Hard ceiling on non-preempted child evaluations</td>
+			</tr>
+			<tr>
+					<td><code>budgets.maxConcurrentEvaluations</code></td>
+					<td>Yes</td>
+					<td>Integer (<code>1..64</code>, <code>&lt;= maxEvaluations</code>)</td>
+					<td>Parallel child evaluation slots per generation</td>
+			</tr>
+			<tr>
+					<td><code>budgets.targetRooflineHeadroom</code></td>
+					<td>No</td>
+					<td>Finite number (<code>&gt;= 1.0</code>)</td>
+					<td>Optional Roofline headroom early-stop target</td>
+			</tr>
+			<tr>
+					<td><code>budgets.scratchpadIntervalGenerations</code></td>
+					<td>No</td>
+					<td>Integer (<code>1..32</code>, default <code>5</code>)</td>
+					<td>Generation interval for read-only scratchpad synthesis</td>
+			</tr>
+	</tbody>
+</table>
+<h2 id="plateau-team-evolution">Plateau team evolution</h2>
+<p>Optional <code>spec.teamEvolution</code> invokes a read-only supervisor role only when an island stalls or hits <code>RunEval</code> loop pathology:</p>
+<ul>
+<li><strong>Archetype capability ceiling</strong>: Supervisor <code>TeamPatch</code> outputs may only recompose roles within <code>allowedArchetypeRoles</code> tool and network ceilings.</li>
+<li><strong>Zero-mutation supervisor</strong>: The supervisor runs in an isolated read-only <code>LocalRunStore</code> (<code>no_change</code> verified) with zero repo write tools.</li>
+<li><strong>Trial rollback safety</strong>: Trial teams auto-rollback to the incumbent after <code>trialGenerations</code> without Pareto or niche gain; malformed patches keep the incumbent active.</li>
+</ul>
+<table>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Bounds and defaults</th>
+					<th>Behavior</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>teamEvolution.enabled</code></td>
+					<td>Yes</td>
+					<td>Boolean</td>
+					<td>Enables plateau and pathology supervisor turns</td>
+			</tr>
+			<tr>
+					<td><code>teamEvolution.supervisorRoleId</code></td>
+					<td>Yes</td>
+					<td>Identifier (<code>1..64</code>)</td>
+					<td>Read-only supervisor role identifier</td>
+			</tr>
+			<tr>
+					<td><code>teamEvolution.allowedArchetypeRoles</code></td>
+					<td>Yes</td>
+					<td><code>1..16</code> role IDs</td>
+					<td>Declared archetype roles bounding synthesized teams</td>
+			</tr>
+			<tr>
+					<td><code>teamEvolution.stallGenerations</code></td>
+					<td>No</td>
+					<td>Integer (<code>1..32</code>, default <code>4</code>)</td>
+					<td>Consecutive low-gain generations before supervisor trigger</td>
+			</tr>
+			<tr>
+					<td><code>teamEvolution.minHypervolumeDelta</code></td>
+					<td>No</td>
+					<td>Number (<code>&gt;= 0</code>, default <code>0.001</code>)</td>
+					<td>Minimum hypervolume gain required to reset stall counter</td>
+			</tr>
+			<tr>
+					<td><code>teamEvolution.triggerOnRunEvalPathology</code></td>
+					<td>No</td>
+					<td>Boolean (default <code>true</code>)</td>
+					<td>Triggers supervisor on repeated <code>RunEval</code> tool-loop pathology</td>
+			</tr>
+			<tr>
+					<td><code>teamEvolution.trialGenerations</code></td>
+					<td>No</td>
+					<td>Integer (<code>1..8</code>, default <code>2</code>)</td>
+					<td>Trial evaluation window before automatic incumbent rollback</td>
+			</tr>
+			<tr>
+					<td><code>teamEvolution.maxTeamSize</code></td>
+					<td>No</td>
+					<td>Integer (<code>1..4</code>, default <code>4</code>)</td>
+					<td>Maximum roles permitted in a synthesized <code>TeamPatch</code></td>
+			</tr>
+			<tr>
+					<td><code>teamEvolution.maxTeamSteps</code></td>
+					<td>No</td>
+					<td>Integer (<code>1..6</code>, default <code>6</code>)</td>
+					<td>Maximum DAG steps permitted in a synthesized <code>TeamPatch</code></td>
+			</tr>
+	</tbody>
+</table>
+<h2 id="bundle-export-contract">Bundle export contract</h2>
+<p>Optional <code>spec.export</code> (or <code>loopwright evolve export</code>) writes deterministic, content-addressed <code>evolution-bundle.v1</code> directories or OCI 1.1 layouts:</p>
+<ul>
+<li><strong>Fail-closed receipt verification</strong>: Export refuses missing HMAC secrets, tampered CAS blobs, incompatible hardware provenance, or unopted <code>synthetic_fixture</code> receipts (<code>EXPORT_UNVERIFIED_FORBIDDEN</code>).</li>
+<li><strong>Atomic staging</strong>: Bundles stage into a sibling non-symlink directory and rename atomically; existing destinations fail with <code>EVOLUTION_CONFLICT</code> unless <code>--overwrite</code> is passed.</li>
+</ul>
+<table>
+	<thead>
+			<tr>
+					<th>Field or member</th>
+					<th>Value or format</th>
+					<th>Role</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>spec.export.format</code></td>
+					<td><code>dir</code> (default) | <code>oci-layout</code></td>
+					<td>Plain directory or OCI 1.1 image layout (<code>oci-layout</code> + <code>index.json</code>)</td>
+			</tr>
+			<tr>
+					<td><code>spec.export.outputDir</code></td>
+					<td>Relative path</td>
+					<td>Target directory for auto-export upon completion</td>
+			</tr>
+			<tr>
+					<td><code>manifest.json</code></td>
+					<td><code>kind: EvolutionBundle</code>, <code>version: 1</code></td>
+					<td>Hardware <code>compatibility</code>, <code>paretoSummary</code>, <code>lineage</code>, and member SHA-256 digests</td>
+			</tr>
+			<tr>
+					<td><code>dispatch-manifest.json</code></td>
+					<td><code>version: 1</code>, <code>fallback: baseline</code></td>
+					<td>Bucket routing rules (<code>dimensionBounds</code>, <code>dtypes</code>, <code>alignmentBytes</code>, <code>blobDigest</code>, <code>entrypoint</code>)</td>
+			</tr>
+			<tr>
+					<td><code>receipts/&lt;id&gt;.verdict.json</code></td>
+					<td>Signed <code>benchmark_verdict</code> JSON</td>
+					<td>Verbatim HMAC-signed hardware verdict receipts per exported individual</td>
+			</tr>
+			<tr>
+					<td><code>blobs/sha256/&lt;hex&gt;</code></td>
+					<td>Verified Stage A CAS blobs</td>
+					<td>Compiled <code>.cubin</code>, <code>.so</code>, <code>.o</code>, or <code>.ptx</code> artifacts referenced by dispatch rules</td>
+			</tr>
+	</tbody>
+</table>
+<nav class="reading-footer" aria-label="Further reading">
+    <section>
+      <h2>See also</h2>
+      <ul class="related-pages"><li><a href="/loopwright/0.0/docs/walkthroughs/evolutionary-campaigns/">Evolutionary Campaigns</a>
+ (end-to-end setup and <code>loopwright evolve</code> walkthrough)</li><li><a href="/loopwright/0.0/docs/configuration/task-contract/#hardware-target-cells">Task Contract</a>
+ (hardware target cells, thresholds, and provenance)</li><li><a href="/loopwright/0.0/docs/operations/cli/#evolution-campaigns">CLI</a>
+ (<code>runner</code> and <code>evolve</code> subcommands)</li></ul>
+    </section><section class="next-page">
+        <h2>Next</h2>
+        <div><a href="/loopwright/0.0/docs/walkthroughs/evolutionary-campaigns/">Evolutionary Campaigns</a>
+ — mark <code>EVOLVE-BLOCK</code> spans, run a hardware relay, and export signed bundles.</div>
+      </section></nav>
+
+      </article>
+    </main>
+    <aside class="toc-panel" aria-label="Page navigation">
+      <div class="toc-inner">
+        
+          <nav id="TableOfContents">
+  <ul>
+    <li><a href="#contents">Contents</a></li>
+    <li><a href="#evolutioncampaign">EvolutionCampaign</a></li>
+    <li><a href="#stages-and-population">Stages and population</a></li>
+    <li><a href="#sampling-and-objectives">Sampling and objectives</a></li>
+    <li><a href="#plateau-team-evolution">Plateau team evolution</a></li>
+    <li><a href="#bundle-export-contract">Bundle export contract</a></li>
+  </ul>
+</nav>
+        
+      </div>
+    </aside>
+  </div>
+  <script src="/loopwright/0.0/js/site.cb70edb8dec0dae174f86424d636c297d7ecb595545ba2b405e20dae4f9cceed.js" defer></script>
+</body>
+</html>
