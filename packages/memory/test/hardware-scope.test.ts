@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import {
   admitTask,
@@ -12,6 +15,8 @@ import {
   type RunStatus,
   type TaskContract,
 } from '@loopwright/core';
+import { applyMemoryProposalCAS } from '../src/cas.js';
+import { finalizeRunMemory } from '../src/finalizer.js';
 import {
   canonical,
   hashDomain,
@@ -21,12 +26,14 @@ import {
   storeDigestOf,
   MemoryDiagnosticError,
 } from '../src/schema.js';
-import { memoryDirectoryFor } from '../src/store.js';
+import { loadMemoryStore, memoryDirectoryFor } from '../src/store.js';
 import { selectActiveMemory } from '../src/selector.js';
 import { verifyMemoryProposal } from '../src/verifier.js';
 import type {
   HardwareMemoryScope,
+  MemoryBudgetLedger,
   MemoryEntry,
+  MemoryFinalizerConfig,
   MemoryProposal,
   MemoryStoreIndex,
   MemoryVerificationInput,
@@ -36,6 +43,7 @@ import {
   SOURCE_REVISION,
   artifactOf,
   digestOf,
+  inventoryMap,
   refOf,
   type RunFixture,
 } from './run-fixtures.js';
@@ -775,5 +783,304 @@ describe('active memory selector hardwareScope filtering', () => {
       snap.excludedEntries.map(e => [e.entryId, e.reason]),
       [['entry.unproven.fact', 'hardware_or_gate_unproven']],
     );
+  });
+});
+
+describe('finalizer hardwareScope gating integration', () => {
+  function buildMixedHardwareRun(options: {
+    readonly runId: string;
+    readonly status: 'completed' | 'failed';
+    readonly accelerator: string;
+  }): RunFixture {
+    const contract: TaskContract = {
+      ...makeContract(['hardware_execution'], options.accelerator),
+      spec: {
+        ...makeContract(['hardware_execution'], options.accelerator).spec,
+        acceptance: {
+          required: ['evolve-block-guard.v1', 'benchmark-gate.v1'],
+          checks: [
+            { id: 'evolve-block-guard.v1', allowedEvidenceLevels: ['local_execution'] },
+            { id: 'benchmark-gate.v1', allowedEvidenceLevels: ['hardware_execution'], targetCellId: 'cuda-b200' },
+          ],
+        },
+      },
+    };
+    const admitted = admitTask(contract, { admissionId: `admission.${options.runId}`, runId: options.runId });
+    if (!admitted.ok) throw new Error(JSON.stringify(admitted.errors));
+    const lock = admitted.value;
+    const candidate = artifactOf('candidate.bin', `candidate-${options.runId}`);
+    const manifest: ArtifactManifest = {
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'ArtifactManifest',
+      metadata: { id: 'candidate' },
+      spec: { entries: [refOf(candidate)] },
+    };
+    const bound = bindSubject(lock, manifest);
+    if (!bound.ok) throw new Error(JSON.stringify(bound.errors));
+    const subject = bound.value;
+
+    const passed = options.status === 'completed';
+    const observedStatus = passed ? 'passed' : 'failed';
+    const localArtifact = artifactOf('evidence-guard.bin', `guard-${options.runId}-${options.status}`);
+    const hwArtifact = artifactOf('evidence-bench.bin', `bench-${options.runId}-${options.status}`);
+
+    const localEvidence: Evidence = {
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Evidence',
+      metadata: { id: 'evidence.evolve-block-guard.v1' },
+      spec: {
+        checkId: 'evolve-block-guard.v1',
+        observedStatus,
+        producerId: 'producer.guard',
+        method: 'evolve-block-guard',
+        level: 'local_execution',
+        subject: structuredClone(subject),
+        artifacts: [refOf(localArtifact)],
+        reason: passed ? null : 'guard violation',
+      },
+    };
+    const hwEvidence: Evidence = {
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Evidence',
+      metadata: { id: 'evidence.benchmark-gate.v1' },
+      spec: {
+        checkId: 'benchmark-gate.v1',
+        observedStatus,
+        producerId: 'producer.hw',
+        method: 'benchmark-gate',
+        level: 'hardware_execution',
+        subject: structuredClone(subject),
+        artifacts: [refOf(hwArtifact)],
+        reason: passed ? null : 'benchmark regression',
+        hardwareProvenance: {
+          targetCellId: 'cuda-b200',
+          probeKind: 'physical',
+          vendor: 'nvidia',
+          deviceModel: 'B200',
+          accelerator: options.accelerator,
+          isolationMode: 'whole_device',
+          deviceCount: 1,
+          driverVersion: '570.124.06',
+          runtimeVersion: 'cuda-12.8',
+          workloadDigest: hex('workload'),
+          clockLockMode: 'locked',
+        },
+      },
+    };
+    const claims = [
+      {
+        checkId: 'evolve-block-guard.v1',
+        status: observedStatus as 'passed' | 'failed',
+        evidenceId: localEvidence.metadata.id,
+        reason: passed ? null : 'guard violation',
+      },
+      {
+        checkId: 'benchmark-gate.v1',
+        status: observedStatus as 'passed' | 'failed',
+        evidenceId: hwEvidence.metadata.id,
+        reason: passed ? null : 'benchmark regression',
+      },
+    ];
+    const built = constructRunResult(
+      {
+        trusted: {
+          expectedLock: lock,
+          candidateManifest: manifest,
+          eligibleEvidence: [localEvidence, hwEvidence],
+          usage: [],
+          externalEffects: 'none',
+          noChange: null,
+        },
+        candidate: { status: options.status, checks: claims, memory: { status: 'not_requested', reason: null } },
+      },
+      [candidate, localArtifact, hwArtifact],
+    );
+    if (!built.ok) throw new Error(JSON.stringify(built.errors));
+    return {
+      lock,
+      result: built.value,
+      evidence: [localEvidence, hwEvidence],
+      manifest,
+      artifactRefs: [refOf(candidate), refOf(localArtifact), refOf(hwArtifact)],
+    };
+  }
+
+  it('omits hardwareScope on local_execution facts, retains it on hardware_execution facts and failure_observations, and passes verify + CAS', async () => {
+    const hardwareScope: HardwareMemoryScope = {
+      accelerator: 'sm_100a',
+      driverConstraint: '>=570.0',
+      operatorFamily: 'gemm',
+      boundPipeline: 'tensor_cube',
+    };
+    const ledger: MemoryBudgetLedger = {
+      revision: 1,
+      remainingTokens: 1000,
+      remainingModelCalls: 5,
+      remainingWallMs: 60000,
+    };
+    const makeConfig = (nowMs: number): MemoryFinalizerConfig => ({
+      taskpack: 'demo',
+      memoryWritable: [memoryDirectoryFor('demo')],
+      onNoModelBudget: 'deterministic-observations-only',
+      nowMs,
+      ttlMs: 86_400_000,
+      upstreamVersions: { npm: '1.0.0' },
+      hardwareScope,
+    });
+
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-hw-finalizer-'));
+    try {
+      await mkdir(join(root, 'src'), { recursive: true });
+      await writeFile(join(root, 'src', 'kernel.cu'), '// kernel', { mode: 0o600 });
+
+      // 1. Failed hardware run: failure_observation entries retain hardwareScope (even for local_execution checks)
+      const failedRun = buildMixedHardwareRun({ runId: 'run.hw.fail', status: 'failed', accelerator: 'sm_100a' });
+      const failedOutcome = await finalizeRunMemory({
+        context: {
+          kind: 'summary',
+          repository: root,
+          summary: {
+            lock: failedRun.lock,
+            result: failedRun.result,
+            incident: null,
+            observations: [],
+            evidence: failedRun.evidence,
+            ledger,
+            candidateManifest: failedRun.manifest.spec.entries,
+            artifacts: failedRun.artifactRefs,
+          },
+        },
+        config: makeConfig(1000),
+      });
+      assert.equal(failedOutcome.status, 'proposed');
+      assert.ok(failedOutcome.proposal !== null);
+      assert.equal(failedOutcome.deterministicEntries.length, 2);
+      for (const entry of failedOutcome.deterministicEntries) {
+        assert.equal(entry.kind, 'failure_observation');
+        assert.deepEqual({ ...entry.scope.hardwareScope }, hardwareScope);
+      }
+
+      const emptyStore = (await loadMemoryStore(root, 'demo', 'org/repo')).index;
+      const failedReport = verifyMemoryProposal({
+        proposal: failedOutcome.proposal,
+        store: emptyStore,
+        lock: failedRun.lock,
+        result: failedRun.result,
+        incident: null,
+        evidence: failedRun.evidence,
+        artifacts: inventoryMap(failedRun),
+        candidateDigest: failedRun.result.spec.subject.candidateDigest,
+        patch: failedOutcome.patch ?? '',
+        secretValues: [],
+        memoryWritable: [memoryDirectoryFor('demo')],
+        protectedPaths: [],
+      });
+      assert.equal(failedReport.satisfied, true);
+      assert.deepEqual(failedReport.gates.flatMap(g => g.diagnostics), []);
+
+      const failedCas = await applyMemoryProposalCAS({
+        repository: root,
+        taskpack: 'demo',
+        proposal: failedOutcome.proposal,
+        lock: failedRun.lock,
+        result: failedRun.result,
+        incident: null,
+        evidence: failedRun.evidence,
+        artifacts: inventoryMap(failedRun),
+        candidateDigest: failedRun.result.spec.subject.candidateDigest,
+        secretValues: [],
+        memoryWritable: [memoryDirectoryFor('demo')],
+        protectedPaths: [],
+        targetBranch: 'main',
+        currentRevision: BASE_REVISION,
+        baseStore: emptyStore,
+        allowRebase: true,
+        nowMs: 1000,
+      });
+      assert.equal(failedCas.applied, true);
+
+      // 2. Completed hardware run with passing local_execution + passing hardware_execution checks
+      const completedRun = buildMixedHardwareRun({ runId: 'run.hw.pass', status: 'completed', accelerator: 'sm_100a' });
+      const completedOutcome = await finalizeRunMemory({
+        context: {
+          kind: 'summary',
+          repository: root,
+          summary: {
+            lock: completedRun.lock,
+            result: completedRun.result,
+            incident: null,
+            observations: [],
+            evidence: completedRun.evidence,
+            ledger,
+            candidateManifest: completedRun.manifest.spec.entries,
+            artifacts: completedRun.artifactRefs,
+          },
+        },
+        config: makeConfig(2000),
+      });
+      assert.equal(completedOutcome.status, 'proposed');
+      assert.ok(completedOutcome.proposal !== null);
+      assert.equal(completedOutcome.deterministicEntries.length, 2);
+
+      const localFact = completedOutcome.deterministicEntries.find(e => e.claimKey === 'claim.check.evolve-block-guard.v1');
+      const hwFact = completedOutcome.deterministicEntries.find(e => e.claimKey === 'claim.check.benchmark-gate.v1');
+      assert.ok(localFact !== undefined);
+      assert.ok(hwFact !== undefined);
+      assert.equal(localFact.kind, 'fact');
+      assert.equal(hwFact.kind, 'fact');
+      assert.equal(Object.hasOwn(localFact.scope, 'hardwareScope'), false);
+      assert.deepEqual({ ...hwFact.scope.hardwareScope }, hardwareScope);
+      assert.equal(localFact.supersedes.length, 1);
+      assert.equal(hwFact.supersedes.length, 1);
+
+      const storeBeforePass = (await loadMemoryStore(root, 'demo', 'org/repo')).index;
+      const completedReport = verifyMemoryProposal({
+        proposal: completedOutcome.proposal,
+        store: storeBeforePass,
+        lock: completedRun.lock,
+        result: completedRun.result,
+        incident: null,
+        evidence: completedRun.evidence,
+        artifacts: inventoryMap(completedRun),
+        candidateDigest: completedRun.result.spec.subject.candidateDigest,
+        patch: completedOutcome.patch ?? '',
+        secretValues: [],
+        memoryWritable: [memoryDirectoryFor('demo')],
+        protectedPaths: [],
+      });
+      assert.equal(completedReport.gates.length, 6);
+      assert.equal(completedReport.satisfied, true);
+      assert.deepEqual(completedReport.gates.flatMap(g => g.diagnostics), []);
+
+      const completedCas = await applyMemoryProposalCAS({
+        repository: root,
+        taskpack: 'demo',
+        proposal: completedOutcome.proposal,
+        lock: completedRun.lock,
+        result: completedRun.result,
+        incident: null,
+        evidence: completedRun.evidence,
+        artifacts: inventoryMap(completedRun),
+        candidateDigest: completedRun.result.spec.subject.candidateDigest,
+        secretValues: [],
+        memoryWritable: [memoryDirectoryFor('demo')],
+        protectedPaths: [],
+        targetBranch: 'main',
+        currentRevision: BASE_REVISION,
+        baseStore: storeBeforePass,
+        allowRebase: true,
+        nowMs: 2000,
+      });
+      assert.equal(completedCas.applied, true);
+
+      const finalStore = (await loadMemoryStore(root, 'demo', 'org/repo')).index;
+      assert.equal(finalStore.entries.length, 2);
+      const persistedLocal = finalStore.entries.find(e => e.claimKey === 'claim.check.evolve-block-guard.v1');
+      const persistedHw = finalStore.entries.find(e => e.claimKey === 'claim.check.benchmark-gate.v1');
+      assert.ok(persistedLocal !== undefined && Object.hasOwn(persistedLocal.scope, 'hardwareScope') === false);
+      assert.ok(persistedHw !== undefined && persistedHw.scope.hardwareScope?.accelerator === 'sm_100a');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -2027,7 +2027,7 @@ export function parseNvidiaHealthOutput(
   scrubber: SecretScrubber,
 ): AcceleratorHealthProbeResult {
   const combined = `${queryOutput}\n${detailOutput}`;
-  if (/\bxid\b[:\s#-]*\d*/i.test(combined) && /\bxid\b/i.test(combined)) {
+  if (/\bxid\b/i.test(combined)) {
     return buildUnhealthyProbeResult({
       probeKind: 'physical',
       vendor: 'nvidia',

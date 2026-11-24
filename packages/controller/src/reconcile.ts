@@ -73,7 +73,7 @@ export function reconcileCycle(input: ReconcileCycleInput, ports: ControllerPort
     try {
       const retained = await readRetained({ runRoot: input.runRoot, runId: input.runId });
       if (retained.descriptor.configuration.roleModelOverrides !== undefined && state.input.roleModelOverrides === undefined) {
-        const reloaded = await loadConfiguration({ ...state.input, roleModelOverrides: retained.descriptor.configuration.roleModelOverrides }, { environment: name => process.env[name] });
+        const reloaded = await loadConfiguration({ ...state.input, roleModelOverrides: retained.descriptor.configuration.roleModelOverrides }, { environment: state.environment });
         if (reloaded.ok) { effectiveConfig = reloaded.value; state = approvedState(effectiveConfig); }
       }
     } catch { /* admit() below will validate retained run and report the canonical diagnostic */ }
@@ -89,7 +89,7 @@ export function reconcileCycle(input: ReconcileCycleInput, ports: ControllerPort
 }
 /** Shared retained-run admission for both reconciliation paths. */
 async function admit(input: ReconcileCycleInput, plan: import('./types.js').CompiledPlan, ports: ControllerPorts) {
-  const admitted = await admitRetainedRun({ runRoot: input.runRoot, runId: input.runId, configuration: input.configuration, phase: 'recovery' });
+  const admitted = await admitRetainedRun({ runRoot: input.runRoot, runId: input.runId, configuration: input.configuration, environment: approvedState(input.configuration).environment, phase: 'recovery' });
   if (!same(plan, admitted.plan)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const effectivePorts = validatePortsAgainstHostPolicy(ports, admitted.hostPolicy, 'recovery');
   return { ...admitted, effectivePorts };

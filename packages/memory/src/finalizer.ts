@@ -438,21 +438,39 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
     const hardwareScope = config.hardwareScope === undefined
       ? undefined
       : hardwareMemoryScopeSchema(config.hardwareScope, '/config/hardwareScope');
-    const priorSameClaim = (claimKey: string): readonly string[] =>
+    const priorSameClaim = (claimKey: string, entryHardwareScope: MemoryEntry['scope']['hardwareScope']): readonly string[] =>
       [...new Set(
         loaded.index.entries
           .filter(candidate =>
             candidate.claimKey === claimKey
             && targetMatrixOverlaps(candidate.scope.targetMatrix, targetMatrix)
-            && hardwareScopeOverlaps(candidate.scope.hardwareScope, hardwareScope))
+            && hardwareScopeOverlaps(candidate.scope.hardwareScope, entryHardwareScope))
           .map(candidate => candidate.id),
       )].sort().slice(0, 32);
-    const buildEntry = (id: string, claimKey: string, claim: string, kind: MemoryEntry['kind'], refs: readonly MemoryEvidenceRef[]): MemoryEntry =>
-      ({ version: 1, id, claimKey, claim: boundedClaim(claim), kind, scope: hardwareScope === undefined
-        ? { taskpack: config.taskpack, repository: contract.spec.target.repository, paths: normalizedWritablePaths, targetMatrix }
-        : { taskpack: config.taskpack, repository: contract.spec.target.repository, paths: normalizedWritablePaths, targetMatrix, hardwareScope },
-        sourceRef, sourceDigest, verifiedAtMs: config.nowMs,
-        validFor: validity, expiresAtMs: config.nowMs + config.ttlMs, supersedes: priorSameClaim(claimKey), evidenceRefs: refs });
+    const buildEntry = (id: string, claimKey: string, claim: string, kind: MemoryEntry['kind'], refs: readonly MemoryEvidenceRef[]): MemoryEntry => {
+      const entryHardwareScope = hardwareScope === undefined
+        ? undefined
+        : kind === 'fact' || kind === 'invariant'
+          ? (refs.some(ref => ref.level === 'hardware_execution' && ref.observedStatus === 'passed') ? hardwareScope : undefined)
+          : hardwareScope;
+      return {
+        version: 1,
+        id,
+        claimKey,
+        claim: boundedClaim(claim),
+        kind,
+        scope: entryHardwareScope === undefined
+          ? { taskpack: config.taskpack, repository: contract.spec.target.repository, paths: normalizedWritablePaths, targetMatrix }
+          : { taskpack: config.taskpack, repository: contract.spec.target.repository, paths: normalizedWritablePaths, targetMatrix, hardwareScope: entryHardwareScope },
+        sourceRef,
+        sourceDigest,
+        verifiedAtMs: config.nowMs,
+        validFor: validity,
+        expiresAtMs: config.nowMs + config.ttlMs,
+        supersedes: priorSameClaim(claimKey, entryHardwareScope),
+        evidenceRefs: refs,
+      };
+    };
     const deterministicEntries: MemoryEntry[] = [];
     const rows = settled.result === null ? [] : [...settled.result.spec.verification.spec.required, ...settled.result.spec.verification.spec.optional];
     const passedCheckClaimKeys = new Set<string>(
