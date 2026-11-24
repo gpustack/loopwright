@@ -310,7 +310,7 @@ function makeLeaseGrant(overrides: Partial<LeaseGrant['job']> = {}): LeaseGrant 
   };
 }
 
-test('T6 types & backward parity: legacy BenchmarkRequest and SignedBenchmarkVerdictReceipt canonical hashes remain unchanged while optional audit/bucket/diagnostics parse cleanly', () => {
+test('types & backward parity: legacy BenchmarkRequest and SignedBenchmarkVerdictReceipt canonical hashes remain unchanged while optional audit/bucket/diagnostics parse cleanly', () => {
   const legacyReq: BenchmarkRequest = {
     version: 1,
     kind: 'benchmark_request',
@@ -427,7 +427,7 @@ test('T6 types & backward parity: legacy BenchmarkRequest and SignedBenchmarkVer
   assert.equal(receipt.hardwareDiagnostics?.boundPipeline, 'tensor_cube');
 });
 
-test('T6 Stage A static symbol & spill audit: denies ELF64 (.so/.o/.cubin), PTX, and SASS cublasGemmEx / at::native:: / maxLocalSpillBytes: 0 with ZERO Stage B executions', async () => {
+test('Stage A static symbol & spill audit: denies ELF64 (.so/.o/.cubin), PTX, and SASS cublasGemmEx / at::native:: / maxLocalSpillBytes: 0 with ZERO Stage B executions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'lw-t6-stagea-audit-'));
   try {
     const workDir = join(root, 'work');
@@ -732,7 +732,7 @@ test('T6 Stage A static symbol & spill audit: denies ELF64 (.so/.o/.cubin), PTX,
   }
 });
 
-test('T6 Stage B 49,152-byte bucketMetrics + sanitized hardwareDiagnostics parser, secret/free-text/file-export rejection, and all_buckets threshold denial', async () => {
+test('Stage B 49,152-byte bucketMetrics + sanitized hardwareDiagnostics parser, secret/free-text/file-export rejection, and all_buckets threshold denial', async () => {
   const scrubber = new SecretScrubber();
   const canarySecret = 'HELDOUT_SECRET_CANARY_TOKEN_778899AABBCC';
   scrubber.register(canarySecret);
@@ -1024,7 +1024,7 @@ test('T6 Stage B 49,152-byte bucketMetrics + sanitized hardwareDiagnostics parse
   }
 });
 
-test('T6 probeAcceleratorHealth: validates RTX 4090, RX 7800 XT low-power banner, and Ascend fixtures, detecting sticky Xid/ECC/hang faults and scrubbing secrets', async () => {
+test('probeAcceleratorHealth: validates RTX 4090, RX 7800 XT low-power banner, and Ascend fixtures, detecting sticky Xid/ECC/hang faults and scrubbing secrets', async () => {
   const secretToken = 'PROBE_STDERR_SECRET_TOKEN_5544332211';
   const scrubber = new SecretScrubber();
   scrubber.register(secretToken);
@@ -1240,7 +1240,7 @@ test('T6 probeAcceleratorHealth: validates RTX 4090, RX 7800 XT low-power banner
   assert.equal(timeoutProbe.faultKind, 'probe_timeout');
 });
 
-test('T6 worker.ts post-crash GPU quarantine: runs healthProbe after Stage B crash BEFORE :complete and throws WORKER_DEVICE_QUARANTINED before a second /v1/runner/leases:acquire', async () => {
+test('worker.ts post-crash GPU quarantine: runs healthProbe after Stage B crash BEFORE :complete and throws WORKER_DEVICE_QUARANTINED before a second /v1/runner/leases:acquire', async () => {
   const root = await mkdtemp(join(tmpdir(), 'lw-t6-worker-quarantine-'));
   const casDir = join(root, 'cas');
   const workDir = join(root, 'work');

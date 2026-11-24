@@ -1063,14 +1063,40 @@ export function buildStageScopedTaskpack(
 
   if (teamPatch !== undefined) {
     const baseRoleById = new Map((baseTaskpack.spec.roles ?? []).map(r => [r.id, r] as const));
+    const declaredModelsByKey = new Map<string, { readonly provider: string; readonly model: string; readonly thinking?: string }>();
+    for (const m of baseTaskpack.spec.models ?? []) {
+      const entry = {
+        provider: m.provider,
+        model: m.id,
+        ...(m.thinking !== undefined ? { thinking: m.thinking } : {}),
+      };
+      declaredModelsByKey.set(m.id, entry);
+      declaredModelsByKey.set(`${m.provider}/${m.id}`, entry);
+    }
+    for (const r of baseTaskpack.spec.roles ?? []) {
+      if (r.model !== undefined && r.provider !== undefined) {
+        const entry = {
+          provider: r.provider,
+          model: r.model,
+          ...(r.thinking !== undefined ? { thinking: r.thinking } : {}),
+        };
+        if (!declaredModelsByKey.has(r.model)) {
+          declaredModelsByKey.set(r.model, entry);
+        }
+        if (!declaredModelsByKey.has(`${r.provider}/${r.model}`)) {
+          declaredModelsByKey.set(`${r.provider}/${r.model}`, entry);
+        }
+      }
+    }
     const firstModel = baseTaskpack.spec.models?.[0];
     const mappedRoles: TaskpackRoleDeclaration[] = teamPatch.roles.map(pr => {
       const arch = baseRoleById.get(pr.archetypeRoleId);
+      const resolvedModel = pr.model !== undefined ? declaredModelsByKey.get(pr.model) : undefined;
       return {
         id: pr.id,
-        provider: arch?.provider ?? firstModel?.provider ?? 'delegated',
-        model: pr.model ?? arch?.model ?? firstModel?.id ?? 'default',
-        thinking: pr.thinking ?? arch?.thinking ?? firstModel?.thinking ?? 'medium',
+        provider: resolvedModel?.provider ?? arch?.provider ?? firstModel?.provider ?? 'delegated',
+        model: resolvedModel?.model ?? pr.model ?? arch?.model ?? firstModel?.id ?? 'default',
+        thinking: pr.thinking ?? arch?.thinking ?? resolvedModel?.thinking ?? firstModel?.thinking ?? 'medium',
         purpose: pr.purpose,
         prompt: pr.prompt,
         tools: [...pr.tools] as TaskpackToolName[],

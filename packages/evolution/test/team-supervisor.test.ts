@@ -1175,7 +1175,7 @@ test('team-supervisor: valid probe-readonly -> mutator-sandboxed StepHandoffSele
   }
 });
 
-test('team-supervisor (S-C1 + P-W3): preserves role.thinking, role.timeoutSeconds (narrowing compiledRegistry toolWallMs), step.onRework, and rejects reworkGenerations D > 256 overflow', async () => {
+test('team-supervisor: preserves role.thinking, role.timeoutSeconds (narrowing compiledRegistry toolWallMs), step.onRework, and rejects reworkGenerations D > 256 overflow', async () => {
   const { taskpack, baseTaskContract, trustedRegistry } = await makeCompiledBaseFixtures();
 
   const patchWithRework: TeamPatchV1 = {
@@ -1295,7 +1295,7 @@ test('team-supervisor (S-C1 + P-W3): preserves role.thinking, role.timeoutSecond
   );
 });
 
-test('team-supervisor (P-M1): createLocalRunStoreSupervisorRunner executes supervisorRoleId in a fenced read-only LocalRunStore and refuses workspace mutations', async () => {
+test('team-supervisor: createLocalRunStoreSupervisorRunner executes supervisorRoleId in a fenced read-only LocalRunStore and refuses workspace mutations', async () => {
   const tempDir = mkdtempSync(join(tmpdir(), 'evo-supervisor-local-runstore-'));
   try {
     const repoDir = join(tempDir, 'repo');
@@ -1306,7 +1306,7 @@ test('team-supervisor (P-M1): createLocalRunStoreSupervisorRunner executes super
     const { taskpack, baseTaskContract, trustedRegistry } = await makeCompiledBaseFixtures();
     const store = await EvolutionCampaignStore.open({ campaignRoot: join(tempDir, 'campaign') });
     try {
-      const lease = await store.acquireLease('pm1-owner');
+      const lease = await store.acquireLease('supervisor-runstore-owner');
       const manifest = parseEvolutionCampaignDocument(CAMPAIGN_WITH_TEAM_YAML);
       await store.createCampaign(lease, {
         campaignId: 'camp-pm1',

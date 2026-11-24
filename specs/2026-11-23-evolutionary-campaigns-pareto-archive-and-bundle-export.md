@@ -11,7 +11,7 @@ Deliver evolutionary optimization across Loopwright for hardware kernels, contin
 
 ### Goals
 
-Loopwright ships two-stage blind GPU/NPU verification (`benchmark-gate.v1` and `@loopwright/hardware-runner` in [`2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md`](2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md)) and deterministic section handoffs, conditional rules, and `RunEval` health telemetry ([`2026-11-21-phase2-suite-handoff-and-run-eval.md`](2026-11-21-phase2-suite-handoff-and-run-eval.md)). Seven architectural gaps still prevent Loopwright from driving non-convex evolutionary search for an evolving LLM inference engine:
+Loopwright ships two-stage blind GPU/NPU verification (`benchmark-gate.v1` and `@loopwright/hardware-runner` in [`2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md`](2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md)) and deterministic section handoffs, conditional rules, and `RunEval` health telemetry ([`2026-11-21-multi-domain-suite-handoff-and-run-eval.md`](2026-11-21-multi-domain-suite-handoff-and-run-eval.md)). Seven architectural gaps still prevent Loopwright from driving non-convex evolutionary search for an evolving LLM inference engine:
 
 1. **Single-lineage pass/fail loops discard stepping stones**:
    - [`packages/state/src/schema.ts`](../packages/state/src/schema.ts) models a singleton `run` row, and [`packages/controller/src/progress.ts`](../packages/controller/src/progress.ts) caps per-run checkpoints at `D <= 256`.

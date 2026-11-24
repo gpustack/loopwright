@@ -87,7 +87,7 @@ function createBarrier(parties: number): () => Promise<void> {
   };
 }
 
-describe('executeTurnkeyCycle concurrent environment isolation (S-C2)', () => {
+describe('executeTurnkeyCycle concurrent environment isolation', () => {
   it('runs two parallel executeTurnkeyCycle calls with distinct ephemeralEnv secrets without clobbering each other or mutating process.env', async () => {
     const base = await realpath(tmpdir());
     const holder = await mkdtemp(join(base, 'lw-tp-env-iso-'));

@@ -45,7 +45,7 @@ import { normalizeSubmission } from '../src/submission.js';
 import { authenticatedCheck, preflightVerification, prepareVerification, Verifier, type ByteInventory } from '../src/verification.js';
 import { signPayload } from '../src/gate.js';
 
-const BENCH_SECRET = 'T5_BENCH_SIGNING_SECRET_Aa11Bb22Cc33';
+const BENCH_SECRET = 'BENCH_SIGNING_SECRET_Aa11Bb22Cc33';
 const WORKLOAD_DIGEST = { algorithm: 'sha256' as const, hex: 'a'.repeat(64) };
 
 async function initGitRepo(directory: string, files: Readonly<Record<string, string>>): Promise<string> {

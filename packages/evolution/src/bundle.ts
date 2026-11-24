@@ -1060,7 +1060,15 @@ function synthesizeDispatchManifest(
   defaultEntrypoint: string,
   scrubber: SecretScrubber,
 ): DispatchManifestV1 {
-  const orderedIndividuals = [...selectedIndividuals].sort((a, b) => {
+  const dispatchCandidates = campaign.manifest.spec.stages.mode === 'specialist-then-portfolio'
+    ? (() => {
+      const portfolioWorkloadId = campaign.manifest.spec.stages.portfolioHeldOutWorkloadId;
+      const specialists = selectedIndividuals.filter(ind => !isPortfolioCandidate(ind, portfolioWorkloadId));
+      return specialists.length > 0 ? specialists : selectedIndividuals;
+    })()
+    : selectedIndividuals;
+
+  const orderedIndividuals = [...dispatchCandidates].sort((a, b) => {
     const aHasBucket = a.bucketId !== null ? 0 : 1;
     const bHasBucket = b.bucketId !== null ? 0 : 1;
     if (aHasBucket !== bHasBucket) return aHasBucket - bHasBucket;

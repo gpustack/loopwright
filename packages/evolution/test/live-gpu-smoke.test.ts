@@ -435,7 +435,7 @@ async function runHostLivePhysicalCampaign(options: {
   }
 }
 
-test('live-gpu-smoke (P-M3): physical CUDA/ROCm SSH probe, Stage A PTX/ELF static audit, 2-gen campaign, and physical bundle export', async t => {
+test('live-gpu-smoke: physical CUDA/ROCm SSH probe, Stage A PTX/ELF static audit, 2-gen campaign, and physical bundle export', async t => {
   const cudaHost = process.env['LOOPWRIGHT_CUDA_SSH_HOST']?.trim();
   const rocmHost = process.env['LOOPWRIGHT_ROCM_SSH_HOST']?.trim();
 

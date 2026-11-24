@@ -37,8 +37,8 @@ import {
   type TeamPatchV1,
 } from '../src/index.js';
 
-const HMAC_SECRET = 'fix-b1-relay-hmac-secret-0123456789abcdef';
-const WORKER_TOKEN = 'fix-b1-worker-bearer-token-0123456789abcdef';
+const HMAC_SECRET = 'hardening-relay-hmac-secret-0123456789abcdef';
+const WORKER_TOKEN = 'hardening-worker-bearer-token-0123456789abcdef';
 
 function sha256Hex(data: Uint8Array | string): string {
   return createHash('sha256').update(data).digest('hex');
@@ -147,7 +147,7 @@ const MULTI_CELL_TASKPACK_YAML = `
 apiVersion: loopwright.dev/v1alpha1
 kind: Taskpack
 metadata:
-  name: fix-b1-taskpack
+  name: hardening-taskpack
 spec:
   goal:
     candidate: Optimize decode kernel inside EVOLVE-BLOCK.
@@ -235,7 +235,7 @@ const BASE_CAMPAIGN_YAML = `
 apiVersion: loopwright.dev/v1alpha1
 kind: EvolutionCampaign
 metadata:
-  name: fix-b1-campaign
+  name: hardening-campaign
 spec:
   taskpack: .loopwright/taskpack.yaml
   targetCellId: cuda-h100-whole
@@ -270,7 +270,7 @@ spec:
     scratchpadIntervalGenerations: 1
 `;
 
-test('fix-b1 (S-H5): sanitizeRunId emits controller-valid lowercase <= 64-char IDs and preserves trailing hex nonces', () => {
+test('sanitizeRunId emits controller-valid lowercase <= 64-char IDs and preserves trailing hex nonces', () => {
   const controllerRe = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 
   const upperColon = sanitizeRunId('ind-g1-i0-Decode_BS16:4k-a1b2c3');
@@ -297,8 +297,8 @@ test('fix-b1 (S-H5): sanitizeRunId emits controller-valid lowercase <= 64-char I
   assert.notEqual(idA, idB);
 });
 
-test('fix-b1 (S-C1 + P-W3): buildStageScopedTaskpack scopes heldOutWorkloadId strictly to targetCellId and Tampered team_configs in campaign.sqlite fail closed on reload', async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), 'evo-fix-sc1-'));
+test('buildStageScopedTaskpack scopes heldOutWorkloadId strictly to targetCellId, resolves cross-provider models, and tampered team_configs fail closed on reload', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'evo-hardening-scoped-'));
   try {
     const taskpack = await loadDeclarativeTaskpack({
       bytes: Buffer.from(MULTI_CELL_TASKPACK_YAML, 'utf8'),
@@ -360,13 +360,36 @@ test('fix-b1 (S-C1 + P-W3): buildStageScopedTaskpack scopes heldOutWorkloadId st
     assert.equal(cudaGate?.heldOutWorkloadId, 'specialist-cuda-bs1');
     assert.equal(rocmGate?.heldOutWorkloadId, 'rocm-untouched-workload', 'non-target cell gate must NEVER be overwritten');
 
-    assert.equal(scoped.spec.roles?.find(r => r.id === 'mutator-fast')?.thinking, 'low');
-    assert.equal(scoped.spec.roles?.find(r => r.id === 'rev-gate')?.thinking, 'high');
+    const mutatorFast = scoped.spec.roles?.find(r => r.id === 'mutator-fast');
+    const revGate = scoped.spec.roles?.find(r => r.id === 'rev-gate');
+    assert.equal(mutatorFast?.provider, 'openai', 'cross-provider role.model must resolve provider from Taskpack.spec.models');
+    assert.equal(mutatorFast?.model, 'gpt-5.4');
+    assert.equal(mutatorFast?.thinking, 'low');
+    assert.equal(revGate?.provider, 'anthropic');
+    assert.equal(revGate?.model, 'claude-sonnet-4-6');
+    assert.equal(revGate?.thinking, 'high');
     assert.equal(scoped.spec.limits?.toolTimeoutSeconds, 75);
     assert.deepEqual(
       scoped.spec.steps?.find(s => s.id === 'step-rev')?.onRework,
       { rejectTo: 'step-mut', maxReworks: 2 },
     );
+
+    // Explicit provider/model syntax in TeamPatch also resolves to bare model ID + matched provider
+    const scopedQualified = buildStageScopedTaskpack({
+      taskpack,
+      heldOutWorkloadId: 'specialist-cuda-bs1',
+      targetCellId: 'cuda-h100-whole',
+      teamPatch: {
+        ...patch,
+        roles: [
+          { ...patch.roles[0]!, model: 'openai/gpt-5.4' },
+          patch.roles[1]!,
+        ],
+      },
+    });
+    const qualifiedMutator = scopedQualified.spec.roles?.find(r => r.id === 'mutator-fast');
+    assert.equal(qualifiedMutator?.provider, 'openai');
+    assert.equal(qualifiedMutator?.model, 'gpt-5.4');
 
     // Reloading a tampered team_configs patch from campaign.sqlite MUST fail closed with TEAM_ENVELOPE_VIOLATION!
     const repoDir = join(tempDir, 'repo');
@@ -452,8 +475,8 @@ test('fix-b1 (S-C1 + P-W3): buildStageScopedTaskpack scopes heldOutWorkloadId st
   }
 });
 
-test('fix-b1 (S-H2): refuses overlapping campaignRoot/repositoryRoot and materializes Git checkouts cleanly around untracked node_modules/.bin symlinks while refusing tracked symlinks', async () => {
-  const tempDir = mkdtempSync(join(realpathSync(tmpdir()), 'evo-fix-sh2-'));
+test('refuses overlapping campaignRoot/repositoryRoot and materializes Git checkouts cleanly around untracked node_modules/.bin symlinks while refusing tracked symlinks', async () => {
+  const tempDir = mkdtempSync(join(realpathSync(tmpdir()), 'evo-hardening-checkout-'));
   try {
     const repoDir = join(tempDir, 'repo');
     initGitRepo(repoDir, {
@@ -527,8 +550,8 @@ test('fix-b1 (S-H2): refuses overlapping campaignRoot/repositoryRoot and materia
   }
 });
 
-test('fix-b1 (S-C2 + S-H3 + P-M2 + P-W5): concurrent child evaluator never mutates process.env, preserves evo-parent-* & evo-scratchpad in role.resourceIds, rejects cosmetic clone BEFORE benchmark-gate.v1 dispatch, and forwards driverConstraint', async () => {
-  const tempDir = mkdtempSync(join(realpathSync(tmpdir()), 'evo-fix-sc2-sh3-pm2-'));
+test('concurrent child evaluator never mutates process.env, preserves evo-parent-* & evo-scratchpad in role.resourceIds, rejects cosmetic clone BEFORE benchmark-gate.v1 dispatch, and forwards driverConstraint', async () => {
+  const tempDir = mkdtempSync(join(realpathSync(tmpdir()), 'evo-hardening-child-'));
   const relayCasDir = join(tempDir, 'relay-cas');
   const workerWorkDir = join(tempDir, 'worker-work');
   const workloadsDir = join(tempDir, 'workloads');
@@ -569,7 +592,7 @@ test('fix-b1 (S-C2 + S-H3 + P-M2 + P-W5): concurrent child evaluator never mutat
   const workerAbort = new AbortController();
   const workerPromise = runHardwareWorker({
     config: {
-      workerId: 'worker-fix-b1',
+      workerId: 'worker-hardening',
       relayUrl: relay.url,
       workerToken: WORKER_TOKEN,
       workDir: workerWorkDir,
@@ -618,7 +641,7 @@ test('fix-b1 (S-C2 + S-H3 + P-M2 + P-W5): concurrent child evaluator never mutat
     mkdirSync(join(repoDir, 'node_modules', '.bin'), { recursive: true });
     symlinkSync('../../scripts/build.sh', join(repoDir, 'node_modules', '.bin', 'fake-bin'));
 
-    const bundleRelDir = '.loopwright-out/bundles/fix-b1';
+    const bundleRelDir = '.loopwright-out/bundles/hardening';
     const bundleOutDir = join(repoDir, bundleRelDir);
     const campaignYaml = `${BASE_CAMPAIGN_YAML}  export:\n    format: dir\n    outputDir: ${bundleRelDir}\n`;
 
@@ -691,20 +714,20 @@ test('fix-b1 (S-C2 + S-H3 + P-M2 + P-W5): concurrent child evaluator never mutat
       receiptSigningSecret: HMAC_SECRET,
     });
 
-    // S-C2: zero process.env mutation during or after concurrent child runs
+    // Zero process.env mutation during or after concurrent child runs
     assert.equal(sawProcessEnvMutation, false);
     assert.equal(process.env[secretEnvVarName], undefined);
 
-    // S-H3: evo-parent-0 and evo-scratchpad were NOT dropped from role.resourceIds despite role-level instructions!
+    // evo-parent-0 and evo-scratchpad are preserved in role.resourceIds despite role-level instructions
     assert.equal(sawParentContextInAgent, true, 'evo-parent-0 must be exposed in contextFiles when role.instructions is set');
     assert.equal(sawScratchpadInAgent, true, 'evo-scratchpad must be exposed in contextFiles when role.instructions is set');
 
-    // P-M2: Gen 1 ran 2 worker leases (Island 0 + Island 1); Gen 2 Island 0 clone was rejected pre-gate (0 leases!), Gen 2 Island 1 ran 1 lease -> total 3 leases!
+    // Gen 1 ran 2 worker leases (Island 0 + Island 1); Gen 2 Island 0 clone was rejected pre-gate (0 leases), Gen 2 Island 1 ran 1 lease -> total 3 leases
     assert.equal(res.noveltyRejectionsCount, 1);
     assert.equal(workerLeases, 3, 'cosmetic clone must be rejected BEFORE benchmark-gate.v1 acquires any worker lease');
     assert.equal(res.campaign.evaluationsUsed, 3);
 
-    // P-W5: auto-exported bundle carries hardware.driverConstraint (">=550.54") in compatibility
+    // Auto-exported bundle carries hardware.driverConstraint (">=550.54") in compatibility
     assert.ok(res.exportedBundle !== undefined);
     const bundleManifest = JSON.parse(
       readFileSync(join(bundleOutDir, 'manifest.json'), 'utf8'),
@@ -720,8 +743,8 @@ test('fix-b1 (S-C2 + S-H3 + P-M2 + P-W5): concurrent child evaluator never mutat
   }
 });
 
-test('fix-b1 (S-H4 + P-W4): specialist-then-portfolio supports 5..64 specialist buckets and resets per-island roofline/stall state across buckets', async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), 'evo-fix-sh4-pw4-'));
+test('specialist-then-portfolio supports 5..64 specialist buckets and resets per-island roofline/stall state across buckets', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'evo-hardening-buckets-'));
   try {
     // Verify stageMultiParentContextFiles still enforces <= 4 crossover donors
     await assert.rejects(
@@ -817,7 +840,7 @@ spec:
           diagnosis: {
             summary: 'Bucket 1 stalled after Bucket 0 hit roofline',
             plateauCategory: 'coupled_responsibilities',
-            rationale: 'Verify P-W4 reset allowed supervisor invocation in Bucket 1',
+            rationale: 'Verify per-bucket reset allowed supervisor invocation in Bucket 1',
           },
           roles: [
             {
@@ -881,8 +904,8 @@ spec:
   }
 });
 
-test('fix-b1 (P-W1 + S-M1 + P-W2): wires decisionPolicy/transport mutationKind & declaredTracks, caps >64 island history slices without crashing, and retains soft_passed stepping stones in MAP-Elites niches without exporting them', async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), 'evo-fix-pw1-sm1-pw2-'));
+test('wires decisionPolicy/transport mutationKind & declaredTracks, caps >64 island history slices without crashing, and retains soft_passed stepping stones in MAP-Elites niches without exporting them', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'evo-hardening-decisions-'));
   try {
     const repoDir = join(tempDir, 'repo');
     const taskpackWithDecisions = MULTI_CELL_TASKPACK_YAML.replace(
@@ -990,7 +1013,7 @@ test('fix-b1 (P-W1 + S-M1 + P-W2): wires decisionPolicy/transport mutationKind &
     assert.equal(isl0Elites.some(e => e.status === 'soft_passed' && e.nicheKey === 'bound_pipeline=smem_lds_ub'), true);
     assert.equal(inspected.paretoFrontier.every(e => e.status === 'passed'), true);
 
-    // S-M1: Seed 70 passed individuals on Island 0 (> 64 DECISION_NOVELTY_MAX_HISTORY_SLICES) and resume -> must NOT crash with DECISION_SCHEMA_INVALID!
+    // Seed 70 passed individuals on Island 0 (> 64 DECISION_NOVELTY_MAX_HISTORY_SLICES) and resume without overflowing novelty history cap
     await res.store.close();
 
     const seventyRoot = join(tempDir, 'camp-70-slices');
@@ -1100,8 +1123,8 @@ test('fix-b1 (P-W1 + S-M1 + P-W2): wires decisionPolicy/transport mutationKind &
   }
 });
 
-test('fix-b1 (S-M2 + S-M3): mid-generation SIGTERM resumes unfinished islands in same generation, evaluator throws close SQLite store cleanly, and collectChildBenchmarkArtifacts rejects symlinks/hardlinks/prototype keys', async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), 'evo-fix-sm2-sm3-'));
+test('mid-generation SIGTERM resumes unfinished islands in same generation, evaluator throws close SQLite store cleanly, and collectChildBenchmarkArtifacts rejects symlinks/hardlinks/prototype keys', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'evo-hardening-resume-'));
   try {
     const repoDir = join(tempDir, 'repo');
     const baseRevision = initGitRepo(repoDir, {
@@ -1110,7 +1133,7 @@ test('fix-b1 (S-M2 + S-M3): mid-generation SIGTERM resumes unfinished islands in
       'src/kernels/decode.cu': { content: KERNEL_SRC },
     });
 
-    // 1. S-M2: 2 islands, maxConcurrentEvaluations = 1; SIGTERM after Gen 1 Island 0 -> resume MUST complete Gen 1 Island 1 (not skip Gen 1 and not re-run Island 0!)
+    // 1. Two islands, maxConcurrentEvaluations = 1; SIGTERM after Gen 1 Island 0 -> resume completes Gen 1 Island 1 without skipping Gen 1 or re-running Island 0
     const midGenRoot = join(tempDir, 'camp-midgen');
     const midGenYaml = BASE_CAMPAIGN_YAML.replace('maxConcurrentEvaluations: 2', 'maxConcurrentEvaluations: 1');
     const abortMid = new AbortController();
@@ -1159,7 +1182,7 @@ test('fix-b1 (S-M2 + S-M3): mid-generation SIGTERM resumes unfinished islands in
     assert.equal(secondHalf.campaign.evaluationsUsed, 4);
     await secondHalf.store.close();
 
-    // 2. S-M2: Throwing inside evaluator closes EvolutionCampaignStore cleanly so immediate reopen succeeds
+    // 2. Throwing inside evaluator closes EvolutionCampaignStore cleanly so immediate reopen succeeds
     const throwRoot = join(tempDir, 'camp-throw-close');
     await assert.rejects(
       () => runEvolutionCampaign({
@@ -1178,7 +1201,7 @@ test('fix-b1 (S-M2 + S-M3): mid-generation SIGTERM resumes unfinished islands in
     assert.equal((await reopenedAfterCrash.getCampaign('camp-throw'))?.campaignId, 'camp-throw');
     await reopenedAfterCrash.close();
 
-    // 3. S-M3: collectChildBenchmarkArtifacts rejects symlink proof, hardlinked proof, and __proto__ keys
+    // 3. collectChildBenchmarkArtifacts rejects symlink proof, hardlinked proof, and __proto__ keys
     const artSymDir = join(tempDir, 'artifacts-symlink');
     mkdirSync(artSymDir, { recursive: true });
     const extProof = join(tempDir, 'external-proof.json');

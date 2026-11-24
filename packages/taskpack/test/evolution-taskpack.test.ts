@@ -208,7 +208,7 @@ function makeMemoryEntry(overrides: {
   });
 }
 
-describe('T8: evolve-block-guard.v1, Stage A static audit, bucketScope, and hardwareScope memory', () => {
+describe('evolve-block-guard.v1, Stage A static audit, bucketScope, and hardwareScope memory', () => {
   it('validates and compiles evolve-block-guard.v1, Stage A static audit fields, and bucketScope through controller compilePlan', async () => {
     await withTempDir(async dir => {
       const repoRoot = join(dir, 'repo');

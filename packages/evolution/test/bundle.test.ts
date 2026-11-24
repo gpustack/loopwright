@@ -1355,13 +1355,13 @@ test('bundle: refuses secrets via SecretScrubber, symlink outputDir, overwrite: 
   }
 });
 
-test('bundle (S-C3 + P-W5): requires receiptSigningSecret or verifyReceiptSignature by default, supports explicit allowUnverifiedSignature opt-in, and auto-populates persisted campaign.driverConstraint', async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), 'evo-bundle-sc3-pw5-'));
+test('bundle: requires receiptSigningSecret or verifyReceiptSignature by default, supports explicit allowUnverifiedSignature opt-in, and auto-populates persisted campaign.driverConstraint', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'evo-bundle-hmac-driver-'));
   try {
     const campRoot = join(tempDir, 'camp');
     const seeded = await seedSingleTargetCampaign(campRoot);
     try {
-      const lease = await seeded.store.acquireLease('pw5-driver-owner');
+      const lease = await seeded.store.acquireLease('driver-constraint-owner');
       await seeded.store.updateCampaignProgress(lease, {
         campaignId: seeded.campaignId,
         driverConstraint: '>=560.35,<570.0',
@@ -1415,6 +1415,206 @@ test('bundle (S-C3 + P-W5): requires receiptSigningSecret or verifyReceiptSignat
     } finally {
       chmodSync(join(campRoot, 'cas', 'sha256'), 0o700);
       await seeded.store.close();
+    }
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('bundle: exports 64-bucket specialist-then-portfolio campaign without overflowing 64 dispatch rules', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'evo-bundle-64-buckets-'));
+  try {
+    const campRoot = join(tempDir, 'camp-64');
+    const store = await EvolutionCampaignStore.open({ campaignRoot: campRoot });
+    try {
+      const lease = await store.acquireLease('bundle-64-owner');
+      const bucketDefs: string[] = [];
+      for (let i = 0; i < 64; i += 1) {
+        const id = `bucket-${String(i).padStart(2, '0')}`;
+        bucketDefs.push(`      - id: ${id}\n        heldOutWorkloadId: wl-${id}`);
+      }
+      const yaml64 = `apiVersion: loopwright.dev/v1alpha1
+kind: EvolutionCampaign
+metadata:
+  name: flash-decode-64-buckets
+spec:
+  taskpack: .loopwright/taskpack.yaml
+  targetCellId: cuda-h100-whole
+  stages:
+    mode: specialist-then-portfolio
+    specialistBuckets:
+${bucketDefs.join('\n')}
+    portfolioHeldOutWorkloadId: decode-portfolio-64
+  population:
+    islands: 1
+    migrationIntervalGenerations: 4
+    maxMigrationElites: 1
+    nicheAxes:
+      - id: bound_pipeline
+        kind: enum
+        values: [hbm, tensor_cube]
+  sampling:
+    noveltyDecayLambda: 1.0
+    mutationWeights:
+      diff_tune: 0.5
+      full_rewrite: 0.5
+      crossover: 0.0
+    maxCrossoversPerPrompt: 1
+  objectives:
+    - metric: latency_us_p50
+      direction: minimize
+  budgets:
+    maxGenerations: 65
+    maxEvaluations: 65
+    maxConcurrentEvaluations: 1
+    scratchpadIntervalGenerations: 10
+`;
+      const manifest = parseEvolutionCampaignDocument(yaml64);
+      const campaignId = 'camp-64-portfolio';
+      const lockHash = makeDigest('lock-64-portfolio');
+      await store.createCampaign(lease, {
+        campaignId,
+        manifest,
+        manifestDigest: makeDigest(yaml64),
+        baseRevision: 'b'.repeat(40),
+        lockHash,
+        modelIds: ['claude-sonnet-4-6'],
+      });
+      await store.updateCampaignProgress(lease, {
+        campaignId,
+        status: 'completed',
+        currentGeneration: 65,
+        driverConstraint: '>=550.54',
+      });
+      const teamConfigId = (await store.listIslands(campaignId))[0]!.activeTeamConfigId;
+
+      const specialistIds: string[] = [];
+      for (let i = 0; i < 64; i += 1) {
+        const bucketId = `bucket-${String(i).padStart(2, '0')}`;
+        const indId = `ind-spec-${String(i).padStart(2, '0')}`;
+        specialistIds.push(indId);
+        const cubin = await store.writeCasBlob(Buffer.from(`ELF64_SPEC_${i}`, 'utf8'));
+        const codeCas = await store.writeCasBlob(Buffer.from(`int k_${i}() { return ${i}; }\n`, 'utf8'));
+        const art: readonly BenchmarkOutputArtifact[] = [
+          { name: `kernel_${i}.cubin`, digest: cubin.digest, byteLength: cubin.byteLength, mediaType: 'application/octet-stream' },
+        ];
+        const receipt = makeSignedReceiptBytes({
+          lockHash,
+          operationId: `op-${indId}`,
+          status: 'approved',
+          probeKind: 'physical',
+          outputArtifacts: art,
+          metrics: { latency_us_p50: 20 + i * 0.1 },
+        });
+        const recCas = await store.writeCasBlob(receipt.rawBytes);
+        await store.recordIndividual(lease, {
+          individualId: indId,
+          campaignId,
+          islandId: 0,
+          generation: 1,
+          bucketId,
+          teamConfigId,
+          modelId: 'claude-sonnet-4-6',
+          trackId: 'triton',
+          mutationKind: 'diff_tune',
+          status: 'passed',
+          failureReason: null,
+          nicheKey: 'bound_pipeline=tensor_cube',
+          paretoRank: 1,
+          crowdingDistance: Number.POSITIVE_INFINITY,
+          scalarFitness: 1.0,
+          codeSliceCasDigest: codeCas.digest,
+          evidenceDigest: makeDigest(`ev-${indId}`),
+          verdictReceiptCasDigest: recCas.digest,
+          outputArtifacts: art.map(a => ({
+            name: `.loopwright-verifier/check.hw-bench/${a.name}`,
+            digest: a.digest,
+            byteLength: a.byteLength,
+            uri: `cas://sha256/${a.digest.hex}`,
+            mediaType: a.mediaType ?? null,
+          })),
+          metrics: { latency_us_p50: 20 + i * 0.1 },
+          bucketMetrics: [{ bucketId, dimensions: { batch: i + 1 }, metrics: { latency_us_p50: 20 + i * 0.1 } }],
+          hardwareProvenance: receipt.provenance,
+        });
+      }
+
+      // Portfolio individual referencing all 64 specialist winners via portfolio_member edges
+      const portCubin = await store.writeCasBlob(Buffer.from('ELF64_PORTFOLIO_DISPATCH', 'utf8'));
+      const portCodeCas = await store.writeCasBlob(Buffer.from('int dispatch_portfolio() { return 0; }\n', 'utf8'));
+      const portArt: readonly BenchmarkOutputArtifact[] = [
+        { name: 'portfolio.cubin', digest: portCubin.digest, byteLength: portCubin.byteLength, mediaType: 'application/octet-stream' },
+      ];
+      const portReceipt = makeSignedReceiptBytes({
+        lockHash,
+        operationId: 'op-ind-portfolio-64',
+        status: 'approved',
+        probeKind: 'physical',
+        outputArtifacts: portArt,
+        metrics: { latency_us_p50: 22.0 },
+      });
+      const portRecCas = await store.writeCasBlob(portReceipt.rawBytes);
+      await store.recordIndividual(lease, {
+        individualId: 'ind-portfolio-64',
+        campaignId,
+        islandId: 0,
+        generation: 65,
+        bucketId: 'decode-portfolio-64',
+        teamConfigId,
+        modelId: 'claude-sonnet-4-6',
+        trackId: 'triton',
+        mutationKind: 'portfolio',
+        status: 'passed',
+        failureReason: null,
+        nicheKey: 'bound_pipeline=tensor_cube',
+        paretoRank: 1,
+        crowdingDistance: Number.POSITIVE_INFINITY,
+        scalarFitness: 1.0,
+        codeSliceCasDigest: portCodeCas.digest,
+        evidenceDigest: makeDigest('ev-portfolio-64'),
+        verdictReceiptCasDigest: portRecCas.digest,
+        outputArtifacts: portArt.map(a => ({
+          name: `.loopwright-verifier/check.hw-bench/${a.name}`,
+          digest: a.digest,
+          byteLength: a.byteLength,
+          uri: `cas://sha256/${a.digest.hex}`,
+          mediaType: a.mediaType ?? null,
+        })),
+        metrics: { latency_us_p50: 22.0 },
+        hardwareProvenance: portReceipt.provenance,
+      });
+      await store.recordLineageEdges(
+        lease,
+        specialistIds.map(specId => ({
+          campaignId,
+          parentIndividualId: specId,
+          childIndividualId: 'ind-portfolio-64',
+          role: 'portfolio_member' as const,
+          sourceIslandId: 0,
+          createdGeneration: 65,
+        })),
+      );
+
+      const outDir = join(tempDir, 'out-64');
+      const exported = await exportEvolutionBundle({
+        store,
+        campaignId,
+        outputDir: outDir,
+        format: 'dir',
+        receiptSigningSecret: TEST_HMAC_SECRET,
+      });
+      assert.equal(exported.format, 'dir');
+
+      const verified = await verifyEvolutionBundle({
+        bundleDir: outDir,
+        receiptSigningSecret: TEST_HMAC_SECRET,
+      });
+      assert.equal(verified.dispatchManifest.rules.length, 64);
+      assert.ok(verified.dispatchManifest.rules.every(r => r.bucketId.startsWith('bucket-')));
+      assert.equal(verified.receiptCount, 65);
+    } finally {
+      chmodSync(join(campRoot, 'cas', 'sha256'), 0o700);
+      await store.close();
     }
   } finally {
     rmSync(tempDir, { recursive: true, force: true });

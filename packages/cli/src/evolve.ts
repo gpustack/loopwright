@@ -1046,8 +1046,15 @@ export function createCliEvolutionSupervisorRunner(options: {
           ephemeralEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] = activeCandidate.token;
           registerSecret(activeCandidate.token);
         }
+        const activeProviderEnvName = activeCandidate?.providerEnvName ?? providerEnvName;
+        const compileBindings = {
+          ...baseBindings,
+          credentialEnvMap: {
+            ...(activeProviderEnvName !== undefined ? { provider: activeProviderEnvName } : {}),
+          },
+        };
 
-        const compiled = await compileDeclarativeTaskpack(supervisorTaskpack, baseBindings);
+        const compiled = await compileDeclarativeTaskpack(supervisorTaskpack, compileBindings);
         const piSessionRoot = join(turn.stagingDir, 'pi-session');
         const trustedDir = join(piSessionRoot, 'trusted');
         const registryDir = join(trustedDir, 'registry');
@@ -1121,6 +1128,15 @@ export function createCliEvolutionSupervisorRunner(options: {
         };
 
         const configBytes = Buffer.from(serializePrettyYaml(finalConfig), 'utf8');
+        if (
+          taskpackScrubber.containsSecret(registryBytes.toString('utf8'))
+          || taskpackScrubber.containsSecret(configBytes.toString('utf8'))
+        ) {
+          throw new evolution.EvolutionError(
+            'SECRET_LEAK_DETECTED',
+            'compiled supervisor taskpack contained a registered secret and was refused',
+          );
+        }
         const registryPath = join(registryDir, 'registry.yaml');
         const configPath = join(configDir, 'config.yaml');
         await writeFile(registryPath, registryBytes, { mode: 0o600 });
@@ -1156,11 +1172,14 @@ export function createCliEvolutionSupervisorRunner(options: {
         }
 
         const captured: { text: string | null } = { text: null };
+        let latestSupCandidateGeneration: number | null = null;
+        let latestSupAttemptCount = 0;
+        let latestSupHasFormatSubmissionEvidence = false;
         const supRunId = evolution.sanitizeRunId(`sup-pi-${turn.runId}`);
         const supControllerRoot = join(piSessionRoot, 'controller');
         await mkdir(supControllerRoot, { recursive: true, mode: 0o700 });
 
-        await runCycleWithPorts(
+        const supCycle = await runCycleWithPorts(
           {
             configuration: loaded.value,
             repository: workspaceDir,
@@ -1171,6 +1190,16 @@ export function createCliEvolutionSupervisorRunner(options: {
           {
             policyProfile: 'local',
             allowWorkflowWrites: false,
+            afterCheckpoint: async (_phase, head) => {
+              latestSupCandidateGeneration = head.progress.candidate.generation;
+              latestSupAttemptCount = head.progress.attempts.length;
+              const onlyFailure = head.progress.failures.length === 1 ? head.progress.failures[0] : undefined;
+              latestSupHasFormatSubmissionEvidence =
+                onlyFailure !== undefined
+                && onlyFailure.evidence !== null
+                && head.progress.submission !== null
+                && onlyFailure.evidence.digest.hex === head.progress.submission.digest.hex;
+            },
             openAdapter: createEvolutionOpenAdapter({
               writtenTaskpack: writtenSupTaskpack,
               effectiveEnv,
@@ -1188,6 +1217,38 @@ export function createCliEvolutionSupervisorRunner(options: {
             }),
           },
         );
+
+        if (!supCycle.ok) {
+          throw new evolution.EvolutionError(
+            'TEAM_ENVELOPE_VIOLATION',
+            `read-only Pi supervisor cycle failed: ${supCycle.error.code}`,
+          );
+        }
+        if (supCycle.value.kind !== 'result') {
+          throw new evolution.EvolutionError(
+            'TEAM_ENVELOPE_VIOLATION',
+            `read-only Pi supervisor cycle ended in incident "${supCycle.value.incident.code}"`,
+          );
+        }
+        const supStatus = supCycle.value.result.spec.status;
+        const supDiagnostics = supCycle.value.result.spec.verification.spec.diagnostics;
+        // The supervisor outputs a TeamPatch JSON instead of a CandidateSubmission envelope.
+        // With maxFormatRepairs=0, controller ends in status="exhausted" strictly after 1 clean
+        // zero-mutation attempt whose sole failure is the raw TeamPatch submission; any other
+        // failure (provider error, incident, timeout, token/call exhaustion, mutation) fails closed.
+        const isExpectedTeamPatchFormatMismatch =
+          supStatus === 'exhausted'
+          && latestSupCandidateGeneration === 0
+          && latestSupAttemptCount === 1
+          && latestSupHasFormatSubmissionEvidence
+          && supDiagnostics.length === 0;
+        if (supStatus !== 'no_change' && supStatus !== 'completed' && !isExpectedTeamPatchFormatMismatch) {
+          const codes = supDiagnostics.map(d => d.code).join(',') || 'none';
+          throw new evolution.EvolutionError(
+            'TEAM_ENVELOPE_VIOLATION',
+            `read-only Pi supervisor cycle did not pass verification (status="${supStatus}", diagnostics=${codes})`,
+          );
+        }
 
         if (captured.text === null || captured.text.trim().length === 0) {
           throw new evolution.EvolutionError(
