@@ -100,7 +100,14 @@ async function writeCompiledEvolutionDir(
         `staged evolution parent context "${relPath}" contained a registered secret and was refused`,
       );
     }
-    stagedParentsToWrite.push({ relPath, bytes, digest: pf.digest });
+    const verifiedDigest = evolution.sha256Digest(bytes);
+    if (verifiedDigest.hex !== pf.digest.hex) {
+      throw new evolution.EvolutionError(
+        'ARTIFACT_INVALID',
+        `staged evolution parent context "${relPath}" digest mismatch against staged digest`,
+      );
+    }
+    stagedParentsToWrite.push({ relPath, bytes, digest: verifiedDigest });
   }
 
   let stagedScratchpadToWrite: { readonly relPath: string; readonly bytes: Buffer; readonly digest: Digest } | null = null;
@@ -600,7 +607,7 @@ export function createCliEvolutionEvaluator(options: {
         signingCredentialRef: signingRef,
         ...(extGate.authCredentialRef !== undefined ? { authCredentialRef: extGate.authCredentialRef } : {}),
         implementation: 'benchmark-gate.v1',
-        timeoutMs: 10_000,
+        timeoutMs: 30_000,
         maxPollMs: 120_000,
         pollInitialMs: 100,
         pollMaxMs: 500,

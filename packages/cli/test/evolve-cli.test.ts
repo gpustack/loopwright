@@ -547,7 +547,7 @@ test('evolve-cli: end-to-end specialist-then-portfolio run, SIGINT pause + resum
           false,
           'portfolioHeldOutWorkloadId must never leak to specialist or portfolio model prompts',
         );
-        if (emitSigintOnSecondEval && sseTurn === 2) {
+        if (emitSigintOnSecondEval && bodyText.includes('bucket: bs16-isl8k')) {
           emitSigintOnSecondEval = false;
           setTimeout(() => {
             process.emit('SIGINT');
@@ -769,7 +769,10 @@ test('evolve-cli: end-to-end specialist-then-portfolio run, SIGINT pause + resum
       '--allow-synthetic-probe',
       '--json',
     ], cliEnv);
-    assert.equal(resumedRun.status, 0, resumedRun.stdout + resumedRun.stderr);
+    if (resumedRun.status !== 0) {
+      const diagInspect = await runCliInProcess(['evolve', 'inspect', '--campaign', campaignStateDir, '--json'], cliEnv);
+      assert.fail(`evolve resume exited ${resumedRun.status}: ${resumedRun.stdout}${resumedRun.stderr}\ninspect: ${diagInspect.stdout}`);
+    }
     const resumedEnv = JSON.parse(resumedRun.stdout.trim()) as {
       kind: string;
       data: { campaign: { status: string; stagePhase: string }; paretoFrontier: readonly { individualId: string }[] };
