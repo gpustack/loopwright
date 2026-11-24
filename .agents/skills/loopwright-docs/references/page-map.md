@@ -2,16 +2,16 @@
 
 One page owns each technical fact or operational workflow. When multiple pages touch a subject, the owning page states the normative contract and every other page links to it.
 
-## Public Site (`13` Pages Across `4` Groups) vs. Repository-Only (`12` Pages)
+## Public Site (`15` Pages Across `4` Groups) vs. Repository-Only (`12` Pages)
 
-Loopwright maintains **25** Markdown pages under `docs/` (plus the index `docs/README.md`):
+Loopwright maintains **27** Markdown pages under `docs/` (plus the index `docs/README.md`):
 
-- **13 Public Pages (`Site Published: yes`)**: Built into the Hugo static site (`site/public/`) across 4 clean groups (`Getting Started`, `Operations`, `Walkthroughs`, `Configuration`), listed in `site/data/navigation.yaml`, and exported to `site/public/llms.txt`.
+- **15 Public Pages (`Site Published: yes`)**: Built into the Hugo static site (`site/public/`) across 4 clean groups (`Getting Started`, `Operations`, `Walkthroughs`, `Configuration`), listed in `site/data/navigation.yaml`, and exported to `site/public/llms.txt`.
 - **12 Repository-Only Pages (`Site Published: no (repo-only)`)**: `docs/development.md`, `docs/contribute/{internals,identity,evidence,state,pi-adapter,runner-taskpack,memory,github-app-internals,closure-matrix}.md`, and `docs/contribute/adr/{0001-local-state-authority,0002-isolated-pi-sdk}.md` remain in repository `docs/` and in `docs/README.md` (`## All pages`) for repository contributors and coding agents, but are excluded from `site/hugo.toml`, `site/data/navigation.yaml`, and `site/public/llms.txt`.
 - **Static `llms.txt` Reference (`Site Published: static Markdown`)**: `docs/references/bootstrap-interview.md` is excluded from HTML site navigation (`site/data/navigation.yaml`) and exported directly to `/references/bootstrap-interview.md` alongside `llms.txt` with rewritten Markdown export links.
-- **Hard Link Boundary**: None of the 13 public pages may link to `development.md` or `contribute/**`.
+- **Hard Link Boundary**: None of the 15 public pages may link to `development.md` or `contribute/**`.
 
-## Canonical 25-Page Inventory
+## Canonical 27-Page Inventory
 
 Every public page (`Site Published: yes`) follows strict **1:1:1 alignment**: `docs/<slugify(group)>/<slugify(title)>.md`, with `Exact # H1 Title === docs/README.md Label === navigation.yaml Label`.
 
@@ -25,11 +25,13 @@ Every public page (`Site Published: yes`) follows strict **1:1:1 alignment**: `d
 | `operations/coding-agents.md` | Operations | `yes` | `Coding Agents` | `Coding Agents` | `<= 400` | Host coding agent operators | `@loopwright/controller`, `@loopwright/cli`, `@loopwright/taskpack`; `specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md` |
 | `walkthroughs/declarative-taskpack.md` | Walkthroughs | `yes` | `Declarative Taskpack` | `Declarative Taskpack` | `<= 400` | Repo maintainers | `@loopwright/taskpack`, `@loopwright/github-app`, `@loopwright/taskpack-runner` |
 | `walkthroughs/managed-controller.md` | Walkthroughs | `yes` | `Managed Controller` | `Managed Controller` | `<= 400` | Platform & CLI operators | `@loopwright/controller`, `@loopwright/cli`, `@loopwright/core` |
+| `walkthroughs/evolutionary-campaigns.md` | Walkthroughs | `yes` | `Evolutionary Campaigns` | `Evolutionary Campaigns` | `<= 400` | Kernel & optimization engineers | `@loopwright/evolution`, `@loopwright/hardware-runner`, `@loopwright/cli` |
 | `configuration/taskpack.md` | Configuration | `yes` | `Taskpack` | `Taskpack` | `<= 400` | Repo maintainers | `@loopwright/taskpack`; `specs/2026-11-20-decouple-taskpack-and-cas-blob-pointers.md` |
 | `configuration/task-contract.md` | Configuration | `yes` | `Task Contract` | `Task Contract` | `<= 400` | Integrators & engineers | `@loopwright/core`; `specs/2026-11-05-task-contracts-and-evidence.md` |
 | `configuration/controller-and-registry.md` | Configuration | `yes` | `Controller and Registry` | `Controller and Registry` | `<= 400` | Controller & CLI operators | `@loopwright/controller`; `specs/2026-11-06-bounded-controller-and-trusted-config.md` |
 | `configuration/sandbox-backends.md` | Configuration | `yes` | `Sandbox Backends` | `Sandbox Backends` | `<= 400` | Platform & security engineers | `@loopwright/agent-pi`, `@loopwright/taskpack`; `specs/2026-11-11-native-os-sandbox-execution-backends.md` |
 | `configuration/decision-routing.md` | Configuration | `yes` | `Decision Routing` | `Decision Routing` | `<= 400` | Triage & policy operators | `@loopwright/decisions`; `specs/2026-11-11-jev-decision-routing-and-controlled-benchmark.md` |
+| `configuration/evolution-campaign.md` | Configuration | `yes` | `Evolution Campaign` | `Evolution Campaign` | `<= 400` | Kernel & optimization engineers | `@loopwright/evolution`; `specs/2026-11-23-evolutionary-campaigns-pareto-archive-and-bundle-export.md` |
 | `development.md` | Contribute (Repo-Only) | `no (repo-only)` | `Development and Verification` | *(excluded from `site/`)* | `<= 400` | Repository contributors | Root workspace, `scripts/`, `.agents/skills/` |
 | `contribute/internals.md` | Contribute (Repo-Only) | `no (repo-only)` | `Workspace Internals and Boundaries` | *(excluded from `site/`)* | `<= 400` | Repository contributors | All workspace packages, `.opencodereview/rule.json` |
 | `contribute/identity.md` | Contribute (Repo-Only) | `no (repo-only)` | `Canonical Identity and Digests` | *(excluded from `site/`)* | `<= 400` | Security & core engineers | `@loopwright/core`; `specs/2026-11-05-task-contracts-and-evidence.md` |
@@ -46,10 +48,10 @@ Every public page (`Site Published: yes`) follows strict **1:1:1 alignment**: `d
 ## Per-Page Scope & Boundary Rules
 
 ### `docs/README.md` (Shared Index)
-- **Owns**: `## Reading paths`, `## Module map` (all 9 module IDs: `contracts`, `state`, `pi-adapter`, `controller`, `taskpacks`, `memory`, `github-app`, `decisions`, `development`), `## Specs`, and `## All pages` (all 25 pages grouped under `### Getting Started`, `### Operations`, `### Walkthroughs`, `### Configuration`, and `### Contribute`).
+- **Owns**: `## Reading paths`, `## Module map` (all 9 module IDs: `contracts`, `state`, `pi-adapter`, `controller`, `taskpacks`, `memory`, `github-app`, `decisions`, `development`), `## Specs`, and `## All pages` (all 27 pages grouped under `### Getting Started`, `### Operations`, `### Walkthroughs`, `### Configuration`, and `### Contribute`).
 - **Must not absorb**: Narrative explanations or configuration snippets.
 
-### Public `site/` Pages (`13` Pages Across `4` Groups)
+### Public `site/` Pages (`15` Pages Across `4` Groups)
 - **`docs/getting-started/architecture.md` (`<= 200` lines)**: 4-stage execution lifecycle (**1. Admit**, **2. Execute**, **3. Verify**, **4. Publish & Remember**), side-by-side comparison of the two operating modes (`Declarative Taskpack` vs. `Managed Controller`), `architecture-flow.svg` + hidden Mermaid flowgraph comment, canonical runtime baseline, and routing links to public configuration pages.
 - **`docs/getting-started/installation.md` (`<= 400` lines)**: Choosing between zero-install GitHub Action (`uses: gpustack/loopwright@main`), laptop CLI installation from `npmjs.com` (`@gpustack/loopwright` via `npm` or `pnpm --ignore-scripts`), GitHub Release tarballs, source checkouts (`npm link`), and `llms.txt` interactive bootstrap prompts.
 - **`docs/operations/github-action.md` (`<= 400` lines)**: Reusable `action.yml` workflow integration in consumer repositories, all 17 Action inputs and 6 outputs, required GitHub token permissions, secret environment bindings, and Pretty YAML consumer workflow examples.
@@ -58,11 +60,13 @@ Every public page (`Site Published: yes`) follows strict **1:1:1 alignment**: `d
 - **`docs/operations/coding-agents.md` (`<= 400` lines)**: Zero-secret operation from OAuth/subscription coding agents (`loopwright step next | submit | cancel`), portable `loopwright-step` skill installation, `StepYield` confinement and lease fencing, multi-role `spec.roles` + `--role-model` routing, and applying `candidate.files.json` from `loopwright inspect` to the local checkout branch.
 - **`docs/walkthroughs/declarative-taskpack.md` (`<= 400` lines)**: End-to-end walkthrough of Loopwright's simple automated mode (`.loopwright/taskpack.yaml` + GitHub Action/App + `llms.txt` prompt migration).
 - **`docs/walkthroughs/managed-controller.md` (`<= 400` lines)**: End-to-end walkthrough of Loopwright's fine-grained governance mode, including the `managed-controller-relations.svg` containment and cross-reference relationship topology (`ControllerConfig` embedding `TaskContract` and referencing `TrustedRegistry` `metadata.name` + SHA-256 + `${ENV}`), `loopwright init`, `check`, `run`, `inspect`, and `reconcile`.
+- **`docs/walkthroughs/evolutionary-campaigns.md` (`<= 400` lines)**: End-to-end walkthrough of Loopwright's evolutionary campaign mode (`EVOLVE-BLOCK` spans, `evolve-block-guard.v1`, hardware `target.matrix` + `benchmark-gate.v1`, outbound `runner relay|worker`, and `loopwright evolve check|run|resume|status|inspect|export`).
 - **`docs/configuration/taskpack.md` (`<= 400` lines)**: Complete `Taskpack` (`.loopwright/taskpack.yaml`) Pretty YAML schema (`metadata.name`), automatic compilation model, and field-by-field reference tables.
 - **`docs/configuration/task-contract.md` (`<= 400` lines)**: Complete `TaskContract` (`apiVersion` + `kind` + `spec`), `VerificationProfile`, and `AttemptReceipt` YAML schemas, field constraints, and enum tables (`roles[].thinking`, `roles[].tools`, `steps[].kind`, `budgets.enforcement.*`, `allowedEvidenceLevels`).
 - **`docs/configuration/controller-and-registry.md` (`<= 400` lines)**: Complete `ControllerConfig` (`controller.draft.yaml`, `spec.registry.name`), `TrustedRegistry` (`registry.draft.yaml`, `metadata.name`), handler implementations, `${NAME}` environment variable interpolation (`environmentBindings`), and bounded repair controls.
 - **`docs/configuration/sandbox-backends.md` (`<= 400` lines)**: Native OS and container sandbox execution backends (`macos-seatbelt`, `linux-bwrap`, `linux-landlock`, `docker`, `direct-dedicated`), `spec.sandbox` YAML configuration, and capability matrix.
 - **`docs/configuration/decision-routing.md` (`<= 400` lines)**: Complete `DecisionPolicy` (`decisions.yaml`, `apiVersion` + `kind` + `spec`) and `spec.decisions` YAML schemas, all 7 provider kinds, disclosure policies, Startlux options, and 3-zone confidence routing (`act`, `confirm`, `escalate`).
+- **`docs/configuration/evolution-campaign.md` (`<= 400` lines)**: Complete `EvolutionCampaign` (`campaign.yaml`, `metadata.name`) Pretty YAML schema, `stages`, `population` islands and `nicheAxes`, `sampling`, `objectives`, `budgets`, plateau `teamEvolution`, and `evolution-bundle.v1` export contract.
 
 ### Repository-Only `Contribute` Pages (`12` Pages)
 - **`docs/development.md` & `docs/contribute/internals.md` (`<= 400` lines each)**: Workspace build/test/lint/site commands, package dependency order, `.agents/skills/*` routing, and `.opencodereview/rule.json` invariants.

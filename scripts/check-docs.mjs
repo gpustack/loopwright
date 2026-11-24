@@ -38,11 +38,13 @@ export const PUBLIC_SITE_DOC_REL_PATHS = new Set([
   "docs/operations/coding-agents.md",
   "docs/walkthroughs/declarative-taskpack.md",
   "docs/walkthroughs/managed-controller.md",
+  "docs/walkthroughs/evolutionary-campaigns.md",
   "docs/configuration/taskpack.md",
   "docs/configuration/task-contract.md",
   "docs/configuration/controller-and-registry.md",
   "docs/configuration/sandbox-backends.md",
-  "docs/configuration/decision-routing.md"
+  "docs/configuration/decision-routing.md",
+  "docs/configuration/evolution-campaign.md"
 ]);
 export const REPO_ONLY_DOC_REL_PATHS = new Set([
   "docs/development.md",
@@ -1228,7 +1230,7 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
       }
     }
 
-    // Site publication link boundary & 1:1 filename-to-H1 slug rule on the 13 public docs pages
+    // Site publication link boundary & 1:1 filename-to-H1 slug rule on the 15 public docs pages
     if (PUBLIC_SITE_DOC_REL_PATHS.has(relDoc)) {
       if (firstNonEmpty && firstNonEmpty.startsWith("# ")) {
         const h1Title = firstNonEmpty.slice(2).trim();

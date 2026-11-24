@@ -49,7 +49,7 @@ Every Loopwright document uses `apiVersion: loopwright.dev/v1alpha1` across decl
 | Managed mode | `TaskContract` | `apiVersion`, `kind`, `spec` | [Task Contract](../configuration/task-contract.md) |
 | Shared policy | `spec.sandbox` | Nested under `Taskpack.spec` | [Sandbox Backends](../configuration/sandbox-backends.md) |
 | Shared policy | `DecisionPolicy` | `apiVersion`, `kind`, `spec` | [Decision Routing](../configuration/decision-routing.md) |
-| Evolution mode | `EvolutionCampaign` | `apiVersion`, `kind`, `metadata.name`, `spec` | [Task Contract](../configuration/task-contract.md#evolutioncampaign) |
+| Evolution mode | `EvolutionCampaign` | `apiVersion`, `kind`, `metadata.name`, `spec` | [Evolution Campaign](../configuration/evolution-campaign.md) |
 | Entry points | Action or `GitHubAppConfig` | Workflow or `apiVersion`, `kind`, `spec` | [GitHub Action](../operations/github-action.md) · [GitHub App](../operations/github-app.md) |
 
 ## Runtime baseline

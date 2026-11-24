@@ -32,7 +32,7 @@ This bypasses `.gitattributes` filters and preserves Git blob bytes.
 
 ## Architecture decisions
 
-The public site contains 13 pages; [Development](../development.md) and this guide remain repository-only. Run `npm run lint:docs`, `node scripts/check-docs.mjs --report`, and `npm run site` after documentation changes.
+The public site contains 15 pages; [Development](../development.md) and this guide remain repository-only. Run `npm run lint:docs`, `node scripts/check-docs.mjs --report`, and `npm run site` after documentation changes.
 
 YAML-first configuration uses `yaml` with the strict 1.2 core schema. Repository issue and PR templates live under `.github/`; the six `.agents/skills/loopwright-*` guides cover overview, docs, step driving, code review, issue and PR preparation, and releases.
 

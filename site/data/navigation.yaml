@@ -13,6 +13,7 @@ groups:
     items:
       - /docs/walkthroughs/declarative-taskpack/
       - /docs/walkthroughs/managed-controller/
+      - /docs/walkthroughs/evolutionary-campaigns/
   - name: Configuration
     items:
       - /docs/configuration/taskpack/
@@ -20,6 +21,7 @@ groups:
       - /docs/configuration/controller-and-registry/
       - /docs/configuration/sandbox-backends/
       - /docs/configuration/decision-routing/
+      - /docs/configuration/evolution-campaign/
 
 labels:
   /docs/getting-started/architecture/: Architecture
@@ -30,8 +32,10 @@ labels:
   /docs/operations/coding-agents/: Coding Agents
   /docs/walkthroughs/declarative-taskpack/: Declarative Taskpack
   /docs/walkthroughs/managed-controller/: Managed Controller
+  /docs/walkthroughs/evolutionary-campaigns/: Evolutionary Campaigns
   /docs/configuration/taskpack/: Taskpack
   /docs/configuration/task-contract/: Task Contract
   /docs/configuration/controller-and-registry/: Controller and Registry
   /docs/configuration/sandbox-backends/: Sandbox Backends
   /docs/configuration/decision-routing/: Decision Routing
+  /docs/configuration/evolution-campaign/: Evolution Campaign
