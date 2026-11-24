@@ -6507,6 +6507,12 @@ export async function executeTurnkeyCycle(
         scrubber.register(value);
       }
     }
+    if (effectiveEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] === undefined) {
+      const inheritedActiveToken = process.env[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
+      if (typeof inheritedActiveToken === 'string' && inheritedActiveToken.length > 0) {
+        effectiveEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] = inheritedActiveToken;
+      }
+    }
     const activeToken = effectiveEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
     if (typeof activeToken === 'string' && activeToken.length > 0) {
       scrubber.register(activeToken);

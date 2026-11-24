@@ -356,9 +356,20 @@ spec:
     outputDir: .loopwright-out/bundles/flash-decode-sm90a
 ```
 
-- **Population and sampling**: `islands` (`1..16`), `nicheAxes` (`1..4` axes), and `maxCrossoversPerPrompt` (`0..4`) preserve stepping-stone diversity.
-- **Team synthesis**: `teamEvolution` runs a read-only supervisor on plateaus, enforcing archetype envelopes and `trialGenerations` rollback.
-- **Budgets and export**: `maxConcurrentEvaluations` (`1..64 <= maxEvaluations`) serializes `campaign.sqlite` writes; `export` emits `evolution-bundle.v1` (`dir` or `oci-layout`).
+| Field path | Required | Bounds and defaults | Behavior |
+| --- | --- | --- | --- |
+| `spec.heldOutWorkloadId` | No | Bucket ID (`1..64` chars) | Single-target holdout workload ID override |
+| `spec.tracks` | No | `1..32` unique IDs | Candidate implementation tracks (`cuda_raw`, `cute`, `triton`) |
+| `spec.stages` | No | `single-target` (default) or `specialist-then-portfolio` | `specialistBuckets` (`1..64`) + `portfolioHeldOutWorkloadId` |
+| `spec.population` | Yes | `islands` `1..16`, `migrationIntervalGenerations` `1..1024`, `maxMigrationElites` `0..16` | Ring-topology island archive and migration cadence |
+| `population.nicheAxes[]` | Yes | `1..4` axes (`enum` `1..32` values or `numeric_bins` `2..32` edges) | Optional `field` maps metric/diagnostic key into MAP-Elites cell |
+| `spec.sampling` | Yes | `noveltyDecayLambda` `(0, 100]`, `modelBandit` `deterministic-round-robin` (default) \| `ucb1`, `maxCrossoversPerPrompt` `0..4` | Parent selection, novelty decay, and model bandit routing |
+| `sampling.mutationWeights` | Yes | `diff_tune`, `full_rewrite`, `crossover` in `[0, 1000]` (sum `> 0`) | Deterministic per-slot mutation operator weights |
+| `spec.teamEvolution` | No | `enabled`, `supervisorRoleId`, `allowedArchetypeRoles` (`1..16`), `maxTeamSize` `1..4` (`4`), `maxTeamSteps` `1..6` (`6`) | Read-only plateau supervisor bounded by archetype envelopes |
+| `teamEvolution` triggers | No | `stallGenerations` `1..32` (`4`), `minHypervolumeDelta` `>= 0` (`0.001`), `triggerOnRunEvalPathology` (`true`), `trialGenerations` `1..8` (`2`) | Plateau/pathology trigger thresholds and trial rollback window |
+| `spec.objectives[]` | Yes | `1..8` unique metrics (`minimize` \| `maximize`) | Multi-objective NSGA-II Pareto frontier and scalar fitness |
+| `spec.budgets` | Yes | `maxGenerations` `1..10000`, `maxEvaluations` `1..100000`, `maxConcurrentEvaluations` `1..64`, `scratchpadIntervalGenerations` `1..32` (`5`) | Hard caps (`maxConcurrent <= maxEvaluations`) and `targetRooflineHeadroom` `>= 1.0` |
+| `spec.export` | No | `format` `dir` (default) \| `oci-layout`, relative `outputDir` | Auto-exports signed `evolution-bundle.v1` upon completion |
 
 ---
 

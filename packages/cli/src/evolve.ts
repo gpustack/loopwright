@@ -1,20 +1,18 @@
-import { createHash, randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
-  LIMITS,
   SecretScrubber as CoreSecretScrubber,
-  type ArtifactRef,
-  type BucketMetricEntry,
   type Digest,
-  type HardwareDiagnostics,
-  type HardwareProvenance,
-  type StructuredFinding,
 } from '@loopwright/core';
 import {
   inspectRun,
+  loadTrustedConfiguration,
   resolveCanonicalCasBlobPath,
+  runCycleWithPorts,
+  type ControllerPorts,
   type RunEvalReport,
 } from '@loopwright/controller';
 import {
@@ -24,9 +22,10 @@ import {
   createTaskpackDecisionPort,
   DEFAULT_HOST_BUDGETS,
   DEFAULT_LOCAL_COMMAND_GATE_ENV,
-  executeTurnkeyCycle,
   loadPiModelsJson,
   LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV,
+  makeAttemptRunId,
+  parseTaskpackManifest,
   resolveDefaultProviderTokenEnv,
   resolveTaskpackModelCandidates,
   SecretScrubber as TaskpackSecretScrubber,
@@ -40,9 +39,6 @@ import {
   type ParsedPiModelsJson,
   type ResolvedModelCandidate,
   type TaskpackManifest,
-  type TaskpackRoleDeclaration,
-  type TaskpackStepDeclaration,
-  type TaskpackToolName,
   type WrittenCompiledTaskpack,
 } from '@loopwright/taskpack';
 import type {
@@ -50,173 +46,19 @@ import type {
   CandidateEvaluationResult,
   CandidateEvaluator,
   IndividualStatus,
-  StageABlobPayload,
-  TeamPatchV1,
+  ReadOnlySupervisorTurnContext,
+  SupervisorRunnerPort,
 } from '@loopwright/evolution';
+import type { DecisionMutationNoveltyResult } from '@loopwright/decisions';
 
-function sha256Digest(bytes: Uint8Array | string): Digest {
-  return Object.freeze({
-    algorithm: 'sha256' as const,
-    hex: createHash('sha256').update(bytes).digest('hex'),
-  });
-}
+type OpenPiHostSessionAdapterV2Fn = typeof import('@loopwright/agent-pi/host-session')['openPiHostSessionAdapterV2'];
+type EvolutionModule = typeof import('@loopwright/evolution');
 
-function sanitizeRunId(raw: string): string {
-  const cleaned = raw
-    .replace(/[^A-Za-z0-9._-]+/g, '-')
-    .replace(/^[^A-Za-z0-9]+/, '')
-    .slice(0, LIMITS.identifier);
-  return cleaned.length > 0 ? cleaned : `ind-${randomBytes(4).toString('hex')}`;
-}
-
-function extractEvolveBlocksFromSource(text: string): string {
-  const lines = text.split('\n');
-  const blocks: string[] = [];
-  let inBlock = false;
-  let current: string[] = [];
-  for (const line of lines) {
-    if (line.includes('EVOLVE-BLOCK-START:')) {
-      inBlock = true;
-      current = [line];
-      continue;
-    }
-    if (inBlock) {
-      current.push(line);
-      if (line.includes('EVOLVE-BLOCK-END:')) {
-        blocks.push(current.join('\n'));
-        inBlock = false;
-        current = [];
-      }
-    }
-  }
-  return blocks.length > 0 ? `${blocks.join('\n')}\n` : text;
-}
-
-async function copyDirectoryNoFollow(
-  srcDir: string,
-  dstDir: string,
-  EvolutionErrorCtor: typeof import('@loopwright/evolution').EvolutionError,
-): Promise<void> {
-  const srcStat = await lstat(srcDir);
-  if (srcStat.isSymbolicLink() || !srcStat.isDirectory()) {
-    throw new EvolutionErrorCtor('EVOLUTION_SYMLINK_FORBIDDEN', `source directory must be a non-symlink directory: "${srcDir}"`, srcDir);
-  }
-  await mkdir(dstDir, { recursive: true, mode: 0o700 });
-  const entries = await readdir(srcDir, { withFileTypes: true });
-  for (const entry of entries) {
-    const srcChild = join(srcDir, entry.name);
-    const dstChild = join(dstDir, entry.name);
-    const st = await lstat(srcChild);
-    if (st.isSymbolicLink()) {
-      throw new EvolutionErrorCtor('EVOLUTION_SYMLINK_FORBIDDEN', `symlink forbidden inside repository tree: "${srcChild}"`, srcChild);
-    }
-    if (st.isDirectory()) {
-      await copyDirectoryNoFollow(srcChild, dstChild, EvolutionErrorCtor);
-    } else if (st.isFile()) {
-      const bytes = await readFile(srcChild);
-      const execBit = (st.mode & 0o111) !== 0;
-      const mode = execBit ? 0o755 : 0o644;
-      await writeFile(dstChild, bytes, { mode });
-      if (execBit) await chmod(dstChild, 0o755);
-    }
-  }
-}
-
-function buildStageScopedTaskpack(
-  baseTaskpack: TaskpackManifest,
-  heldOutWorkloadId: string,
-  teamPatch: TeamPatchV1 | undefined,
-): TaskpackManifest {
-  const updatedGates = baseTaskpack.spec.verification.externalGates.map(gate => {
-    if (gate.implementation !== 'benchmark-gate.v1') return gate;
-    return {
-      ...gate,
-      heldOutWorkloadId,
-    };
-  });
-
-  let roles = baseTaskpack.spec.roles;
-  let steps = baseTaskpack.spec.steps;
-
-  if (teamPatch !== undefined) {
-    const baseRoleById = new Map((baseTaskpack.spec.roles ?? []).map(r => [r.id, r] as const));
-    const firstModel = baseTaskpack.spec.models?.[0];
-    const mappedRoles: TaskpackRoleDeclaration[] = teamPatch.roles.map(pr => {
-      const arch = baseRoleById.get(pr.archetypeRoleId);
-      return {
-        id: pr.id,
-        provider: arch?.provider ?? firstModel?.provider ?? 'delegated',
-        model: pr.model ?? arch?.model ?? firstModel?.id ?? 'default',
-        thinking: arch?.thinking ?? firstModel?.thinking ?? 'medium',
-        purpose: pr.purpose,
-        prompt: pr.prompt,
-        tools: [...pr.tools] as TaskpackToolName[],
-        ...(pr.resourceIds !== undefined ? { resourceIds: [...pr.resourceIds] } : {}),
-      };
-    });
-
-    const mappedAgentSteps: TaskpackStepDeclaration[] = teamPatch.steps.map(ps => ({
-      id: ps.id,
-      kind: 'agent',
-      role: ps.roleId,
-      dependsOn: [...ps.dependsOn],
-      ...(ps.handoffs !== undefined
-        ? {
-          handoffs: ps.handoffs.map(h => ({
-            ...(h.id !== undefined ? { id: h.id } : {}),
-            fromStep: h.fromStep,
-            source: (h.source as { readonly kind: string }).kind === 'assistant_final'
-              ? { kind: 'submission' as const }
-              : h.source,
-            select: h.select,
-            ...(h.maxBytes !== undefined ? { maxBytes: h.maxBytes } : {}),
-            ...(h.required !== undefined ? { required: h.required } : {}),
-          })),
-        }
-        : {}),
-    }));
-
-    const childrenCount = new Map<string, number>(teamPatch.steps.map(s => [s.id, 0] as const));
-    for (const s of teamPatch.steps) {
-      for (const dep of s.dependsOn) {
-        childrenCount.set(dep, (childrenCount.get(dep) ?? 0) + 1);
-      }
-    }
-    const sinkIds = teamPatch.steps.filter(s => (childrenCount.get(s.id) ?? 0) === 0).map(s => s.id);
-    const checkIds = [
-      ...baseTaskpack.spec.verification.localChecks.map(c => c.id),
-      ...updatedGates.map(g => g.id),
-    ];
-    const mappedCheckSteps: TaskpackStepDeclaration[] = checkIds.map((chkId, idx) => ({
-      id: `check-${chkId}`.slice(0, LIMITS.identifier),
-      kind: 'check',
-      check: chkId,
-      dependsOn: idx === 0 ? sinkIds : [`check-${checkIds[idx - 1]!}`.slice(0, LIMITS.identifier)],
-    }));
-
-    roles = mappedRoles;
-    steps = [...mappedAgentSteps, ...mappedCheckSteps];
-  } else if (baseTaskpack.spec.roles !== undefined && baseTaskpack.spec.roles.length > 1 && baseTaskpack.spec.steps === undefined) {
-    const mutatingTaskRoles = baseTaskpack.spec.roles.filter(
-      r => (r.purpose ?? 'task') === 'task' && (r.tools === undefined || r.tools.some(t => t === 'write' || t === 'edit')),
-    );
-    if (mutatingTaskRoles.length >= 1) {
-      const chosen = mutatingTaskRoles[0]!;
-      roles = [{ ...chosen, dependsOn: [] }];
-    }
-  }
-
-  return {
-    ...baseTaskpack,
-    spec: {
-      ...baseTaskpack.spec,
-      ...(roles !== undefined ? { roles } : {}),
-      ...(steps !== undefined ? { steps } : {}),
-      verification: {
-        ...baseTaskpack.spec.verification,
-        externalGates: updatedGates,
-      },
-    },
+function createLazyHostSessionLoader(): () => Promise<OpenPiHostSessionAdapterV2Fn> {
+  let promise: Promise<OpenPiHostSessionAdapterV2Fn> | null = null;
+  return () => {
+    promise ??= import('@loopwright/agent-pi/host-session').then(mod => mod.openPiHostSessionAdapterV2);
+    return promise;
   };
 }
 
@@ -225,6 +67,7 @@ async function writeCompiledEvolutionDir(
   compiled: CompiledTaskpack,
   proposal: CandidateEvaluationProposal,
   scrubber: TaskpackSecretScrubber,
+  evolution: EvolutionModule,
 ): Promise<WrittenCompiledTaskpack> {
   const registryDirectory = join(trustedDirectory, 'registry');
   const configDirectory = join(trustedDirectory, 'config');
@@ -272,34 +115,73 @@ async function writeCompiledEvolutionDir(
       id: 'evo-scratchpad',
       kind: 'document',
       path: relPath,
-      digest: sha256Digest(scBytes),
+      digest: evolution.sha256Digest(scBytes),
     });
   }
 
-  const finalRegistry = extraResources.length > 0
-    ? {
-      ...compiled.registry,
-      spec: {
-        ...compiled.registry.spec,
-        resources: [...compiled.registry.spec.resources, ...extraResources],
-      },
+  const patchRoleById = new Map(
+    (proposal.teamPatch?.roles ?? []).map(r => [r.id, r] as const),
+  );
+  const updatedRoleProfiles = compiled.registry.spec.roleProfiles.map(prof => {
+    for (const [rId, pr] of patchRoleById.entries()) {
+      if ((prof.id === rId || prof.id === `taskpack.profile.${rId}`) && pr.timeoutSeconds !== undefined) {
+        const requestedWallMs = pr.timeoutSeconds * 1000;
+        const currentWallMs = prof.limits?.toolWallMs;
+        const narrowedWallMs = currentWallMs !== undefined ? Math.min(currentWallMs, requestedWallMs) : requestedWallMs;
+        return {
+          ...prof,
+          limits: {
+            ...prof.limits,
+            toolWallMs: narrowedWallMs,
+          },
+        };
+      }
     }
-    : compiled.registry;
+    return prof;
+  });
+
+  const finalRegistry = {
+    ...compiled.registry,
+    spec: {
+      ...compiled.registry.spec,
+      resources: extraResources.length > 0
+        ? [...compiled.registry.spec.resources, ...extraResources]
+        : compiled.registry.spec.resources,
+      roleProfiles: updatedRoleProfiles,
+    },
+  };
   const registryBytes = Buffer.from(`${JSON.stringify(finalRegistry, null, 2)}\n`, 'utf8');
   const registrySha256 = createHash('sha256').update(registryBytes).digest('hex');
 
-  const finalTask = extraResources.length > 0
-    ? {
-      ...compiled.config.spec.task,
-      spec: {
-        ...compiled.config.spec.task.spec,
-        trustedContext: {
+  const extraResourceIds = extraResources.map(r => r.id);
+  const updatedTaskRoles = compiled.config.spec.task.spec.roles.map(role => {
+    const pr = patchRoleById.get(role.id);
+    const baseResIds = pr?.resourceIds !== undefined ? [...pr.resourceIds] : role.resourceIds;
+    if (baseResIds === undefined) {
+      return role;
+    }
+    const mergedResIds = extraResourceIds.length > 0
+      ? Array.from(new Set([...baseResIds, ...extraResourceIds]))
+      : Array.from(new Set(baseResIds));
+    return {
+      ...role,
+      resourceIds: mergedResIds,
+    };
+  });
+
+  const finalTask = {
+    ...compiled.config.spec.task,
+    spec: {
+      ...compiled.config.spec.task.spec,
+      roles: updatedTaskRoles,
+      trustedContext: extraResources.length > 0
+        ? {
           ...compiled.config.spec.task.spec.trustedContext,
           resources: [...compiled.config.spec.task.spec.trustedContext.resources, ...extraResources],
-        },
-      },
-    }
-    : compiled.config.spec.task;
+        }
+        : compiled.config.spec.task.spec.trustedContext,
+    },
+  };
 
   const finalConfig = {
     ...compiled.config,
@@ -346,12 +228,34 @@ async function writeCompiledEvolutionDir(
   };
 }
 
+async function extractSliceFromWorkspaceDir(
+  workspaceDir: string,
+  fallbackRepoDir: string,
+  guardedFiles: readonly string[],
+  fallbackId: string,
+  evolution: EvolutionModule,
+): Promise<string> {
+  if (guardedFiles.length === 0) {
+    return `// individual:${fallbackId}\n`;
+  }
+  const slices: string[] = [];
+  for (const rel of guardedFiles) {
+    const content = await readFile(join(workspaceDir, rel), 'utf8')
+      .catch(() => readFile(join(fallbackRepoDir, rel), 'utf8').catch(() => ''));
+    if (content.length > 0) {
+      slices.push(evolution.extractEvolveBlocksFromSource(content));
+    }
+  }
+  return slices.length > 0 ? slices.join('\n') : `// individual:${fallbackId}\n`;
+}
+
 async function extractCandidateGuardedCodeSlice(
   controllerRunRoot: string,
   attemptRunId: string,
   childRepoDir: string,
   guardedFiles: readonly string[],
   fallbackId: string,
+  evolution: EvolutionModule,
 ): Promise<string> {
   if (guardedFiles.length === 0) {
     return `// individual:${fallbackId}\n`;
@@ -359,6 +263,7 @@ async function extractCandidateGuardedCodeSlice(
   const artifactsDir = join(controllerRunRoot, attemptRunId, 'artifacts');
   const tmpHolder = await mkdtemp(join(await realpath(tmpdir()), 'lw-evo-cand-inspect-'));
   const fileDigestMap = new Map<string, string>();
+  const fileContentMap = new Map<string, string>();
   try {
     const inspected = await inspectRun({
       runRoot: controllerRunRoot,
@@ -368,11 +273,21 @@ async function extractCandidateGuardedCodeSlice(
     if (inspected !== null && inspected.ok) {
       const rawCandidate = await readFile(join(tmpHolder, 'bundle', 'candidate.files.json'), 'utf8').catch(() => null);
       if (rawCandidate !== null) {
-        const parsed = JSON.parse(rawCandidate) as { readonly files?: readonly { readonly name?: unknown; readonly sha256?: unknown }[] };
+        const parsed = JSON.parse(rawCandidate) as {
+          readonly files?: readonly {
+            readonly name?: unknown;
+            readonly sha256?: unknown;
+            readonly encoding?: unknown;
+            readonly body?: unknown;
+          }[];
+        };
         if (Array.isArray(parsed.files)) {
           for (const entry of parsed.files) {
-            if (typeof entry.name === 'string' && typeof entry.sha256 === 'string') {
+            if (typeof entry.name !== 'string') continue;
+            if (typeof entry.sha256 === 'string') {
               fileDigestMap.set(entry.name, entry.sha256);
+            } else if (entry.encoding === 'base64' && typeof entry.body === 'string') {
+              fileContentMap.set(entry.name, Buffer.from(entry.body, 'base64').toString('utf8'));
             }
           }
         }
@@ -384,22 +299,183 @@ async function extractCandidateGuardedCodeSlice(
 
   const slices: string[] = [];
   for (const rel of guardedFiles) {
-    let content = '';
-    const hex = fileDigestMap.get(rel);
-    if (hex !== undefined) {
-      const casPath = await resolveCanonicalCasBlobPath(artifactsDir, hex).catch(() => null);
-      if (casPath !== null) {
-        content = await readFile(casPath, 'utf8').catch(() => '');
+    let content = fileContentMap.get(rel) ?? '';
+    if (content.length === 0) {
+      const hex = fileDigestMap.get(rel);
+      if (hex !== undefined) {
+        const casPath = await resolveCanonicalCasBlobPath(artifactsDir, hex).catch(() => null);
+        if (casPath !== null) {
+          content = await readFile(casPath, 'utf8').catch(() => '');
+        }
       }
     }
     if (content.length === 0) {
       content = await readFile(join(childRepoDir, rel), 'utf8').catch(() => '');
     }
     if (content.length > 0) {
-      slices.push(extractEvolveBlocksFromSource(content));
+      slices.push(evolution.extractEvolveBlocksFromSource(content));
     }
   }
   return slices.length > 0 ? slices.join('\n') : `// individual:${fallbackId}\n`;
+}
+
+function buildEffectiveEnv(
+  runtimeEnv: NodeJS.ProcessEnv,
+  ephemeralEnv: Readonly<Record<string, string>>,
+  scrubber: TaskpackSecretScrubber,
+): Record<string, string | undefined> {
+  const effectiveEnv: Record<string, string | undefined> = Object.create(null) as Record<string, string | undefined>;
+  for (const [key, value] of Object.entries(runtimeEnv)) {
+    if (value !== undefined) {
+      effectiveEnv[key] = value;
+    }
+  }
+  for (const [key, value] of Object.entries(ephemeralEnv)) {
+    effectiveEnv[key] = value;
+    if (value.length > 0) scrubber.register(value);
+  }
+  const activeToken = effectiveEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
+  if (typeof activeToken === 'string' && activeToken.length > 0) {
+    scrubber.register(activeToken);
+  }
+  return effectiveEnv;
+}
+
+function createEvolutionOpenAdapter(options: {
+  readonly writtenTaskpack: WrittenCompiledTaskpack;
+  readonly effectiveEnv: Readonly<Record<string, string | undefined>>;
+  readonly scrubber: TaskpackSecretScrubber;
+  readonly openPiHostSessionAdapterV2: OpenPiHostSessionAdapterV2Fn;
+  readonly onAfterExecute?: ((candidateDir: string, stepId: string, roleId: string) => Promise<void> | void) | undefined;
+  readonly onAfterCapture?: ((artifactsDirectory: string, sessionArtifactName: string) => Promise<void> | void) | undefined;
+}): NonNullable<ControllerPorts['openAdapter']> {
+  const { writtenTaskpack, effectiveEnv, scrubber, openPiHostSessionAdapterV2, onAfterExecute, onAfterCapture } = options;
+
+  return async (host, adapterInput) => {
+    const wrappedHost = {
+      ...host,
+      resolveCredential: async (binding: Parameters<typeof host.resolveCredential>[0]) => {
+        try {
+          const bound = await host.resolveCredential(binding);
+          if (bound.bearerToken.length > 0) return bound;
+        } catch {
+          // Fall through to active candidate token only for taskpack provider bindings.
+        }
+        const bindingMeta = binding as { readonly env?: unknown; readonly ref?: unknown };
+        const hasExplicitMeta = bindingMeta.env !== undefined || bindingMeta.ref !== undefined;
+        const boundRoleMapping = writtenTaskpack.config.spec.profiles.roles.find(
+          item => item.roleId === adapterInput.roleId,
+        );
+        const roleProfile = boundRoleMapping === undefined
+          ? undefined
+          : writtenTaskpack.registry.spec.roleProfiles.find(
+            item => item.id === boundRoleMapping.profileRef,
+          );
+        const explicitEntry = hasExplicitMeta
+          ? writtenTaskpack.registry.spec.credentialBindings.find(entry =>
+            entry.consumer === 'provider'
+            && (
+              (typeof bindingMeta.ref === 'string' && entry.id === bindingMeta.ref)
+              || (typeof bindingMeta.env === 'string' && entry.environmentNames.includes(bindingMeta.env))
+            ))
+          : undefined;
+        const matchesExplicitMeta =
+          bindingMeta.env === LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV
+          || bindingMeta.ref === 'taskpack-provider-token'
+          || (explicitEntry?.environmentNames.includes(LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV) ?? false);
+        const matchesRegistryProviderBinding = writtenTaskpack.registry.spec.credentialBindings.some(entry =>
+          entry.consumer === 'provider'
+          && entry.destinationRef === binding.provider
+          && (roleProfile?.providerCredentialRef === undefined || entry.id === roleProfile.providerCredentialRef)
+          && (entry.id === 'taskpack-provider-token' || entry.environmentNames.includes(LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV)),
+        );
+        if ((hasExplicitMeta && matchesExplicitMeta) || (!hasExplicitMeta && matchesRegistryProviderBinding)) {
+          const active = effectiveEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
+          if (typeof active === 'string' && active.length > 0) {
+            return { bearerToken: active };
+          }
+        }
+        throw new Error('missing provider credential for active candidate');
+      },
+    };
+
+    const opened = await openPiHostSessionAdapterV2(wrappedHost, adapterInput, {
+      scrub: text => scrubber.scrub(text),
+    });
+    if (!opened.ok) {
+      return opened;
+    }
+
+    const inner = opened.value;
+    const sessionCandidateDir = join(host.directory, `sdk-${adapterInput.sessionId}`, 'candidate');
+    return {
+      ok: true,
+      value: {
+        capabilities: () => inner.capabilities(),
+        events: () => inner.events(),
+        close: () => inner.close(),
+        cancel: input => inner.cancel(input),
+        compact: input => inner.compact(input),
+        execute: async input => {
+          const res = await inner.execute(input);
+          if (res.ok && res.value.status === 'execution_settled' && onAfterExecute !== undefined) {
+            await onAfterExecute(sessionCandidateDir, adapterInput.stepId, adapterInput.roleId);
+          }
+          return res;
+        },
+        capture: async input => {
+          const res = await inner.capture(input);
+          if (res.ok && onAfterCapture !== undefined) {
+            await onAfterCapture(host.artifactsDirectory, res.value.session.name);
+          }
+          return res;
+        },
+      },
+    };
+  };
+}
+
+function extractLastAssistantTextFromSessionJsonl(sessionText: string): string | null {
+  const lines = sessionText.split('\n');
+  let lastAssistantText: string | null = null;
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i]?.trim();
+    if (!line) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry === null || typeof entry !== 'object') continue;
+    const rec = entry as { readonly type?: unknown; readonly message?: unknown };
+    if (rec.type !== 'message' || rec.message === null || typeof rec.message !== 'object') continue;
+    const msg = rec.message as { readonly role?: unknown; readonly content?: unknown };
+    if (msg.role !== 'assistant') continue;
+    if (typeof msg.content === 'string') {
+      lastAssistantText = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      let combined = '';
+      for (const block of msg.content) {
+        if (block !== null && typeof block === 'object') {
+          const b = block as { readonly type?: unknown; readonly text?: unknown };
+          if (b.type === 'text' && typeof b.text === 'string') {
+            combined += b.text;
+          }
+        }
+      }
+      if (combined.length > 0) {
+        lastAssistantText = combined;
+      }
+    }
+  }
+  return lastAssistantText;
+}
+
+function unwrapOptionalJsonCodeFence(rawText: string): string {
+  const trimmed = rawText.trim();
+  const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/i.exec(trimmed);
+  return fenced !== null ? fenced[1]!.trim() : trimmed;
 }
 
 /**
@@ -410,15 +486,7 @@ export function createCliEvolutionEvaluator(options: {
   readonly coreScrubber: CoreSecretScrubber;
   readonly taskpackScrubber: TaskpackSecretScrubber;
 }): CandidateEvaluator {
-  const { openPiHostSessionPromise } = (() => {
-    let promise: Promise<typeof import('@loopwright/agent-pi/host-session')['openPiHostSessionAdapterV2']> | null = null;
-    return {
-      openPiHostSessionPromise: () => {
-        promise ??= import('@loopwright/agent-pi/host-session').then(mod => mod.openPiHostSessionAdapterV2);
-        return promise;
-      },
-    };
-  })();
+  const openPiHostSessionPromise = createLazyHostSessionLoader();
 
   const resolvedBaseRepo = resolve(options.repositoryRoot);
   const coreScrubber = options.coreScrubber;
@@ -439,15 +507,17 @@ export function createCliEvolutionEvaluator(options: {
     const realBaseRepo = await realpath(resolvedBaseRepo);
     const childRepoDir = join(childRunDir, 'repo');
     const controllerRunRoot = join(childRunDir, 'controller');
-    const runId = sanitizeRunId(proposal.individualId);
+    const runId = evolution.sanitizeRunId(proposal.individualId);
+    const attemptRunId = makeAttemptRunId(runId, 0);
 
-    await copyDirectoryNoFollow(realBaseRepo, childRepoDir, evolution.EvolutionError);
+    await evolution.materializeGitCheckoutNoFollow(realBaseRepo, childRepoDir);
 
-    const scopedTaskpack = buildStageScopedTaskpack(
-      proposal.taskpack,
-      proposal.heldOutWorkloadId,
-      proposal.teamPatch,
-    );
+    const scopedTaskpack = evolution.buildStageScopedTaskpack({
+      taskpack: proposal.taskpack,
+      heldOutWorkloadId: proposal.heldOutWorkloadId,
+      targetCellId: proposal.manifest.spec.targetCellId,
+      ...(proposal.teamPatch !== undefined ? { teamPatch: proposal.teamPatch } : {}),
+    });
 
     for (const envName of collectManifestSecretEnvNames(scopedTaskpack)) {
       const val = process.env[envName];
@@ -598,26 +668,11 @@ export function createCliEvolutionEvaluator(options: {
       }
 
       const trustedDir = join(controllerRunRoot, `trusted-${runId}`);
-      const writtenTaskpack = await writeCompiledEvolutionDir(trustedDir, compiled, proposal, taskpackScrubber);
+      const writtenTaskpack = await writeCompiledEvolutionDir(trustedDir, compiled, proposal, taskpackScrubber, evolution);
       const decisionPort = createTaskpackDecisionPort(scopedTaskpack, {
         runtimeEnv: process.env,
         scrubber: taskpackScrubber,
         hasPinnedRoles: (scopedTaskpack.spec.roles?.length ?? 0) > 0,
-      });
-
-      const cycleSummary = await executeTurnkeyCycle({
-        runId,
-        attemptSeq: 0,
-        repositoryRoot: childRepoDir,
-        taskpack: writtenTaskpack,
-        runtimeEnv: process.env,
-        ephemeralEnv,
-        scrubber: taskpackScrubber,
-        decisions: decisionPort,
-        policyProfile: 'local',
-        allowWorkflowWrites: false,
-        openHostSessionAdapter: openPiHostSessionAdapterV2,
-        ...(proposal.signal !== undefined ? { signal: proposal.signal } : {}),
       });
 
       const evolveGuardDecl = scopedTaskpack.spec.verification.localChecks.find(
@@ -626,148 +681,525 @@ export function createCliEvolutionEvaluator(options: {
       const guardedFiles = Array.isArray(evolveGuardDecl?.parameters?.['files'])
         ? (evolveGuardDecl.parameters['files'] as readonly string[])
         : [];
-      const extractedCodeSlice = await extractCandidateGuardedCodeSlice(
-        controllerRunRoot,
-        cycleSummary.attemptRunId,
+      const allAgentStepIds = writtenTaskpack.config.spec.task.spec.steps
+        .filter(s => s.kind === 'agent')
+        .map(s => s.id);
+
+      const effectiveEnv = buildEffectiveEnv(process.env, ephemeralEnv, taskpackScrubber);
+      const runRoot = dirname(writtenTaskpack.trustedDirectory);
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700).catch(() => undefined);
+
+      const loaded = await loadTrustedConfiguration({
+        configPath: writtenTaskpack.configPath,
+        registryPath: writtenTaskpack.registryPath,
+        registrySha256: writtenTaskpack.registrySha256,
+        untrustedRoots: [childRepoDir],
+        environment: name => (Object.hasOwn(effectiveEnv, name) ? effectiveEnv[name] : undefined),
+      });
+      if (!loaded.ok) {
+        throw new evolution.EvolutionError(
+          'EVOLUTION_STORE_ERROR',
+          `child loadTrustedConfiguration failed: ${loaded.error.code} (${loaded.error.path})`,
+        );
+      }
+
+      const cycleAbort = new AbortController();
+      const onExternalAbort = (): void => {
+        cycleAbort.abort();
+      };
+      if (proposal.signal !== undefined) {
+        if (proposal.signal.aborted) {
+          cycleAbort.abort();
+        } else {
+          proposal.signal.addEventListener('abort', onExternalAbort, { once: true });
+        }
+      }
+
+      let latestCandidateSlice: string | undefined;
+      let noveltyDecisionOut: DecisionMutationNoveltyResult | undefined;
+      let noveltyRejectedOutcome: {
+        readonly slice: string;
+        readonly decision: DecisionMutationNoveltyResult;
+      } | null = null;
+      let noveltyScreened = false;
+
+      const ports: ControllerPorts = {
+        policyProfile: 'local',
+        allowWorkflowWrites: false,
+        ...(writtenTaskpack.roleMcpServers !== undefined ? { roleMcpServers: writtenTaskpack.roleMcpServers } : {}),
+        ...(writtenTaskpack.watchedPaths !== undefined && writtenTaskpack.watchedPaths.length > 0
+          ? { watchedPaths: writtenTaskpack.watchedPaths }
+          : {}),
+        ...(decisionPort !== undefined ? { decisions: decisionPort } : {}),
+        openAdapter: createEvolutionOpenAdapter({
+          writtenTaskpack,
+          effectiveEnv,
+          scrubber: taskpackScrubber,
+          openPiHostSessionAdapterV2,
+          onAfterExecute: async candidateDir => {
+            latestCandidateSlice = await extractSliceFromWorkspaceDir(
+              candidateDir,
+              childRepoDir,
+              guardedFiles,
+              proposal.individualId,
+              evolution,
+            );
+          },
+        }),
+        afterCheckpoint: async (phase, head) => {
+          if (
+            noveltyScreened
+            || !phase.startsWith('role.')
+            || !phase.endsWith('.post')
+            || proposal.stagePhase === 'portfolio'
+            || proposal.proposedCodeSlice !== undefined
+            || (proposal.noveltyGate === undefined && (proposal.islandHistorySlices?.length ?? 0) === 0)
+          ) {
+            return;
+          }
+          const allAgentsCompleted = allAgentStepIds.length > 0
+            && allAgentStepIds.every(stepId => head.progress.nodes.some(n => n.id === stepId && n.state === 'completed'));
+          if (!allAgentsCompleted) {
+            return;
+          }
+          noveltyScreened = true;
+          const candidateSlice = latestCandidateSlice
+            ?? await extractCandidateGuardedCodeSlice(
+              runRoot,
+              attemptRunId,
+              childRepoDir,
+              guardedFiles,
+              proposal.individualId,
+              evolution,
+            );
+          latestCandidateSlice = candidateSlice;
+          const noveltyOutcome = proposal.noveltyGate !== undefined
+            ? await proposal.noveltyGate(candidateSlice)
+            : await evolution.screenCandidateNoveltyBeforeDispatch({
+              candidateId: proposal.individualId,
+              candidateSlice,
+              historySlices: proposal.islandHistorySlices ?? [],
+              scrubber: coreScrubber,
+            });
+          noveltyDecisionOut = noveltyOutcome.decision;
+          if (noveltyOutcome.rejected) {
+            noveltyRejectedOutcome = {
+              slice: candidateSlice,
+              decision: noveltyOutcome.decision,
+            };
+            cycleAbort.abort();
+          }
+        },
+      };
+
+      const childRunRelPath = `runs/${proposal.individualId}/controller/${attemptRunId}`;
+      let cycleResult: Awaited<ReturnType<typeof runCycleWithPorts>>;
+      try {
+        cycleResult = await runCycleWithPorts(
+          {
+            configuration: loaded.value,
+            repository: childRepoDir,
+            runRoot,
+            runId: attemptRunId,
+            signal: cycleAbort.signal,
+          },
+          ports,
+        );
+      } finally {
+        proposal.signal?.removeEventListener('abort', onExternalAbort);
+      }
+
+      if (noveltyRejectedOutcome !== null) {
+        const rejected: { readonly slice: string; readonly decision: DecisionMutationNoveltyResult } = noveltyRejectedOutcome;
+        return Object.freeze({
+          status: 'failed' as const,
+          failureReason: 'NOVELTY_CLONE_REJECTED',
+          codeSlice: rejected.slice,
+          metrics: Object.freeze({}),
+          outputArtifacts: Object.freeze([]),
+          evidenceDigest: null,
+          childRunRelPath,
+          noveltyDecision: rejected.decision,
+        });
+      }
+
+      const extractedCodeSlice = latestCandidateSlice ?? await extractCandidateGuardedCodeSlice(
+        runRoot,
+        attemptRunId,
         childRepoDir,
         guardedFiles,
         proposal.individualId,
+        evolution,
       );
 
       let runEvalReport: RunEvalReport | undefined;
-      if (cycleSummary.runEval !== null) {
-        runEvalReport = cycleSummary.runEval;
+      const inspectedRes = await inspectRun({
+        runRoot,
+        runId: attemptRunId,
+      }).catch(() => null);
+      if (inspectedRes !== null && inspectedRes.ok && inspectedRes.value.runEval !== null) {
+        runEvalReport = inspectedRes.value.runEval;
       }
 
-      const artifactsDir = join(controllerRunRoot, cycleSummary.attemptRunId, 'artifacts');
-      const artifactNames = await readdir(artifactsDir).catch(() => [] as string[]);
-      const benchProofFiles = artifactNames
-        .filter(n => n.startsWith('benchmark-producer-') && n.endsWith('.proof.json'))
-        .sort();
-
-      let rawVerdictReceiptBytes: Uint8Array | undefined;
-      let metrics: Readonly<Record<string, number>> = Object.freeze({});
-      let bucketMetrics: readonly BucketMetricEntry[] | undefined;
-      let hardwareDiagnostics: HardwareDiagnostics | undefined;
-      let hardwareProvenance: HardwareProvenance | undefined;
-      let findings: readonly StructuredFinding[] | undefined;
-      let outputArtifacts: readonly ArtifactRef[] = Object.freeze([]);
-      const stageABlobs: StageABlobPayload[] = [];
-      let dispReason: string | null = null;
-      let retryablePreemption = false;
-
-      if (benchProofFiles.length > 0) {
-        const latestProofFile = join(artifactsDir, benchProofFiles[benchProofFiles.length - 1]!);
-        const proofJson = JSON.parse(await readFile(latestProofFile, 'utf8')) as Record<string, unknown>;
-        const outputRef = proofJson['output'] as { readonly name?: string } | undefined;
-        const outputName = outputRef?.name;
-        const benchJson: Record<string, unknown> = typeof outputName === 'string' && !outputName.includes('/') && !outputName.includes('..')
-          ? (JSON.parse(await readFile(join(artifactsDir, outputName), 'utf8')) as Record<string, unknown>)
-          : {};
-        const verdictObj = benchJson['verdict'] as Record<string, unknown> | null | undefined;
-        const dispObj = benchJson['disposition'] as Record<string, unknown> | undefined;
-        const responseB64 = benchJson['responseBytes'];
-        const responseSigRaw = benchJson['responseSignature'];
-
-        if (typeof responseB64 === 'string' && responseB64.length > 0) {
-          const decodedBytes = Buffer.from(responseB64, 'base64');
-          if (typeof responseSigRaw === 'string' && responseSigRaw.length > 0) {
-            const sigHex = responseSigRaw.startsWith('sha256=') ? responseSigRaw.slice(7) : responseSigRaw;
-            const parsedResp = JSON.parse(decodedBytes.toString('utf8')) as Record<string, unknown>;
-            rawVerdictReceiptBytes = Buffer.from(`${evolution.canonicalizeJson({ ...parsedResp, signature: sigHex })}\n`, 'utf8');
-          } else {
-            rawVerdictReceiptBytes = decodedBytes;
-          }
-        }
-        if (dispObj !== undefined && typeof dispObj['reason'] === 'string') {
-          dispReason = dispObj['reason'];
-        }
-        if (dispObj?.['retryablePreemption'] === true || dispReason === 'BENCHMARK_PREEMPTED') {
-          retryablePreemption = true;
-        }
-        if (verdictObj !== null && verdictObj !== undefined) {
-          if (verdictObj['metrics'] !== undefined) {
-            metrics = evolution.parseMetricsRecordJson(verdictObj['metrics'] as Readonly<Record<string, number>>);
-          }
-          if (verdictObj['bucketMetrics'] !== undefined) {
-            bucketMetrics = evolution.parseBucketMetricsJson(verdictObj['bucketMetrics'] as readonly BucketMetricEntry[], coreScrubber);
-          }
-          if (verdictObj['hardwareDiagnostics'] !== undefined) {
-            hardwareDiagnostics = evolution.parseHardwareDiagnosticsJson(verdictObj['hardwareDiagnostics'] as HardwareDiagnostics, coreScrubber);
-          }
-          if (verdictObj['hardwareProvenance'] !== undefined) {
-            hardwareProvenance = evolution.parseHardwareProvenanceJson(verdictObj['hardwareProvenance'] as HardwareProvenance);
-          }
-          if (verdictObj['findings'] !== undefined) {
-            findings = evolution.parseStructuredFindingsJson(verdictObj['findings'] as readonly StructuredFinding[], '/findings');
-          }
-          if (dispReason === null && typeof verdictObj['reason'] === 'string') {
-            dispReason = verdictObj['reason'];
-          }
-          if (Array.isArray(verdictObj['outputArtifacts']) && cycleSummary.status === 'completed') {
-            const parsedArts: ArtifactRef[] = [];
-            for (const rawArt of verdictObj['outputArtifacts'] as Array<Record<string, unknown>>) {
-              const name = String(rawArt['name']);
-              const digObj = rawArt['digest'] as { readonly algorithm: 'sha256'; readonly hex: string };
-              const byteLength = Number(rawArt['byteLength']);
-              const mediaType = typeof rawArt['mediaType'] === 'string' ? rawArt['mediaType'] : undefined;
-              const casPath = await resolveCanonicalCasBlobPath(artifactsDir, digObj.hex);
-              const blobBytes = await readFile(casPath);
-              parsedArts.push({
-                name,
-                digest: { algorithm: 'sha256', hex: digObj.hex },
-                byteLength,
-                ...(mediaType !== undefined ? { mediaType } : {}),
-              });
-              stageABlobs.push({
-                name,
-                bytes: blobBytes,
-                digest: { algorithm: 'sha256', hex: digObj.hex },
-                byteLength,
-                ...(mediaType !== undefined ? { mediaType } : {}),
-              });
-            }
-            outputArtifacts = Object.freeze(parsedArts);
-          }
-        }
+      let cycleStatus: string = 'failed';
+      let cycleReasonCode: string | null = null;
+      if (!cycleResult.ok) {
+        cycleStatus = cycleResult.error.code === 'CANCELLED' ? 'cancelled' : 'failed';
+        cycleReasonCode = cycleResult.error.code;
+      } else if (cycleResult.value.kind === 'incident') {
+        cycleStatus = 'failed';
+        cycleReasonCode = cycleResult.value.incident.code;
+      } else {
+        cycleStatus = cycleResult.value.result.spec.status;
+        cycleReasonCode = cycleResult.value.result.spec.verification.spec.diagnostics[0]?.code ?? null;
       }
+
+      const runSucceeded = cycleStatus === 'completed';
+      const artifactsDir = join(runRoot, attemptRunId, 'artifacts');
+      const collected = await evolution.collectChildBenchmarkArtifacts(artifactsDir, runSucceeded, coreScrubber);
 
       let finalStatus: IndividualStatus;
       let failureReason: string | null = null;
-      if (cycleSummary.status === 'cancelled' || proposal.signal?.aborted) {
+      if (cycleStatus === 'cancelled' || proposal.signal?.aborted) {
         finalStatus = 'preempted';
         failureReason = 'CANCELLED';
-      } else if (retryablePreemption) {
+      } else if (collected.retryablePreemption) {
         finalStatus = 'preempted';
         failureReason = 'BENCHMARK_PREEMPTED';
-      } else if (cycleSummary.status === 'completed') {
+      } else if (runSucceeded) {
         finalStatus = 'passed';
         failureReason = null;
       } else {
         finalStatus = 'failed';
-        failureReason = dispReason ?? cycleSummary.reasonCode ?? 'LOCAL_VERIFICATION_FAILED';
+        failureReason = collected.dispositionReason ?? cycleReasonCode ?? 'LOCAL_VERIFICATION_FAILED';
       }
 
       return Object.freeze({
         status: finalStatus,
         failureReason,
         codeSlice: extractedCodeSlice,
-        metrics,
-        ...(bucketMetrics !== undefined ? { bucketMetrics } : {}),
-        ...(hardwareDiagnostics !== undefined ? { hardwareDiagnostics } : {}),
-        ...(hardwareProvenance !== undefined ? { hardwareProvenance } : {}),
-        ...(findings !== undefined ? { findings } : {}),
-        outputArtifacts,
-        ...(stageABlobs.length > 0 ? { stageABlobs: Object.freeze(stageABlobs) } : {}),
-        ...(rawVerdictReceiptBytes !== undefined ? { rawVerdictReceiptBytes } : {}),
-        evidenceDigest: finalStatus === 'passed' ? sha256Digest(`${proposal.individualId}:${cycleSummary.attemptRunId}:passed`) : null,
-        childRunRelPath: `runs/${proposal.individualId}/controller/${cycleSummary.attemptRunId}`,
+        metrics: collected.metrics,
+        ...(collected.bucketMetrics !== undefined ? { bucketMetrics: collected.bucketMetrics } : {}),
+        ...(collected.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: collected.hardwareDiagnostics } : {}),
+        ...(collected.hardwareProvenance !== undefined ? { hardwareProvenance: collected.hardwareProvenance } : {}),
+        ...(collected.findings !== undefined ? { findings: collected.findings } : {}),
+        outputArtifacts: collected.outputArtifacts,
+        ...(collected.stageABlobs.length > 0 ? { stageABlobs: collected.stageABlobs } : {}),
+        ...(collected.rawVerdictReceiptBytes !== undefined ? { rawVerdictReceiptBytes: collected.rawVerdictReceiptBytes } : {}),
+        evidenceDigest: finalStatus === 'passed' ? evolution.sha256Digest(`${proposal.individualId}:${attemptRunId}:passed`) : null,
+        childRunRelPath,
         ...(runEvalReport !== undefined ? { runEvalReport } : {}),
+        ...(noveltyDecisionOut !== undefined ? { noveltyDecision: noveltyDecisionOut } : {}),
       });
     } finally {
       if (localGateServer !== undefined) {
         await localGateServer.close().catch(() => undefined);
       }
     }
+  };
+}
+
+/**
+ * Create a lazy-loaded, strictly read-only `LocalRunStore` Pi-backed plateau supervisor runner
+ * for CLI `evolve run` and `evolve resume` (`tools: ['read']`, `scope.protected: ['**']`,
+ * zero `held_out_workloads` mounts).
+ */
+export function createCliEvolutionSupervisorRunner(options: {
+  readonly coreScrubber: CoreSecretScrubber;
+  readonly taskpackScrubber: TaskpackSecretScrubber;
+  readonly signal?: AbortSignal | undefined;
+}): SupervisorRunnerPort {
+  const openPiHostSessionPromise = createLazyHostSessionLoader();
+  const coreScrubber = options.coreScrubber;
+  const taskpackScrubber = options.taskpackScrubber;
+  const registerSecret = (val: string): void => {
+    if (val.length > 0) {
+      coreScrubber.register(val);
+      taskpackScrubber.register(val);
+    }
+  };
+
+  return async context => {
+    const evolution = await import('@loopwright/evolution');
+    const runner = evolution.createLocalRunStoreSupervisorRunner({
+      policyProfile: 'local',
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      scrubber: coreScrubber,
+      executeReadOnlySupervisorTurn: async (turn: ReadOnlySupervisorTurnContext) => {
+        const openPiHostSessionAdapterV2 = await openPiHostSessionPromise();
+        const supRole = turn.supervisorContract.spec.roles[0];
+        if (supRole === undefined) {
+          throw new evolution.EvolutionError('TEAM_ENVELOPE_VIOLATION', 'supervisor TaskContract missing role declaration');
+        }
+
+        const modelsJsonPath = process.env['LOOPWRIGHT_MODELS_JSON']?.trim() || undefined;
+        const modelsConfig: ParsedPiModelsJson | undefined = modelsJsonPath !== undefined
+          ? await loadPiModelsJson(modelsJsonPath)
+          : undefined;
+        const allowManifestCustomBaseUrl = process.env['LOOPWRIGHT_ALLOW_MANIFEST_CUSTOM_BASE_URL'] === 'true';
+
+        const providerEnvName = resolveDefaultProviderTokenEnv(supRole.provider, {
+          modelsJsonApiKeyEnv: modelsConfig?.providers.get(supRole.provider)?.apiKeyEnv,
+          env: process.env,
+        });
+
+        const workspaceDir = join(turn.stagingDir, 'workspace');
+        const workspaceHeadRev = execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: workspaceDir,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim().toLowerCase();
+
+        const supervisorTaskpack: TaskpackManifest = parseTaskpackManifest(
+          JSON.stringify({
+            apiVersion: 'loopwright.dev/v1alpha1',
+            kind: 'Taskpack',
+            metadata: {
+              name: 'evo-supervisor',
+            },
+            spec: {
+              goal: {
+                candidate: turn.prompt,
+                noChange: turn.prompt,
+              },
+              scope: {
+                writable: ['__supervisor_readonly__/**'],
+                protected: [],
+              },
+              models: [
+                {
+                  provider: supRole.provider,
+                  id: supRole.model,
+                  thinking: supRole.thinking,
+                  ...(providerEnvName !== undefined ? { apiKeyEnv: providerEnvName } : {}),
+                },
+              ],
+              roles: [
+                {
+                  id: turn.roleId,
+                  provider: supRole.provider,
+                  model: supRole.model,
+                  thinking: supRole.thinking,
+                  purpose: 'task',
+                  tools: ['read'],
+                  prompt: turn.prompt,
+                },
+              ],
+              verification: {
+                localChecks: [
+                  {
+                    id: 'supervisor-no-change',
+                    implementation: 'no-change.v1',
+                  },
+                ],
+                externalGates: [],
+              },
+              publication: {
+                mode: 'disabled',
+              },
+            },
+          }),
+          { hostPolicy: { policyProfile: 'local', allowWorkflowWrites: false } },
+        );
+
+        const hostPolicy: ExecutionHostPolicy = {
+          policyProfile: 'local',
+          allowWorkflowWrites: false,
+        };
+        const baseBindings = {
+          mode: 'no-change' as const,
+          hostPolicy,
+          repository: 'local/evolution',
+          repositoryRoot: workspaceDir,
+          baseRevision: workspaceHeadRev,
+          sourceRevision: workspaceHeadRev,
+          targetMatrix: null,
+          allowManifestCustomBaseUrl,
+          ...(modelsJsonPath !== undefined ? { modelsJsonPath } : {}),
+          budgets: {
+            ...DEFAULT_HOST_BUDGETS,
+            wallTimeMs: 300_000,
+            totalTokens: 100_000,
+            maxModelCalls: 4,
+            maxConcurrency: 1,
+            maxFormatRepairs: 0,
+            maxImplementationRepairs: 0,
+          },
+          gateEndpoints: [],
+          publicationEndpoint: null,
+          credentialEnvMap: {
+            ...(providerEnvName !== undefined ? { provider: providerEnvName } : {}),
+          },
+          authorPrompt: turn.prompt,
+          scrubber: taskpackScrubber,
+        };
+
+        const candidates = resolveTaskpackModelCandidates(supervisorTaskpack, baseBindings, {
+          modelsConfig,
+          env: process.env,
+          scrubber: taskpackScrubber,
+        });
+        const activeCandidate = candidates[0];
+        const ephemeralEnv: Record<string, string> = {};
+        if (activeCandidate !== undefined && activeCandidate.usesActiveTokenEnv && activeCandidate.token !== undefined) {
+          ephemeralEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] = activeCandidate.token;
+          registerSecret(activeCandidate.token);
+        }
+
+        const compiled = await compileDeclarativeTaskpack(supervisorTaskpack, baseBindings);
+        const piSessionRoot = join(turn.stagingDir, 'pi-session');
+        const trustedDir = join(piSessionRoot, 'trusted');
+        const registryDir = join(trustedDir, 'registry');
+        const configDir = join(trustedDir, 'config');
+        await mkdir(registryDir, { recursive: true, mode: 0o700 });
+        await mkdir(configDir, { recursive: true, mode: 0o700 });
+        await chmod(trustedDir, 0o700);
+        await chmod(registryDir, 0o700);
+        await chmod(configDir, 0o700);
+
+        const stagedSupResources: Array<{
+          readonly id: string;
+          readonly kind: 'document';
+          readonly path: string;
+          readonly digest: Digest;
+        }> = [];
+        for (const sf of turn.files) {
+          const dstPath = join(registryDir, sf.relativeResourcePath);
+          await mkdir(dirname(dstPath), { recursive: true, mode: 0o700 });
+          const bytes = await readFile(sf.filePath);
+          await writeFile(dstPath, bytes, { mode: 0o400 });
+          await chmod(dstPath, 0o400);
+          stagedSupResources.push({
+            id: sf.resourceId,
+            kind: 'document',
+            path: sf.relativeResourcePath,
+            digest: sf.digest,
+          });
+        }
+
+        const finalRegistry = {
+          ...compiled.registry,
+          spec: {
+            ...compiled.registry.spec,
+            resources: [...compiled.registry.spec.resources, ...stagedSupResources],
+          },
+        };
+        const registryBytes = Buffer.from(`${JSON.stringify(finalRegistry, null, 2)}\n`, 'utf8');
+        const registrySha256 = createHash('sha256').update(registryBytes).digest('hex');
+
+        const stagedResourceIds = stagedSupResources.map(r => r.id);
+        const finalTask = {
+          ...compiled.config.spec.task,
+          spec: {
+            ...compiled.config.spec.task.spec,
+            scope: {
+              ...compiled.config.spec.task.spec.scope,
+              protected: Array.from(new Set(['**', ...compiled.config.spec.task.spec.scope.protected])),
+            },
+            roles: compiled.config.spec.task.spec.roles.map(role => ({
+              ...role,
+              tools: ['read'],
+              resourceIds: Array.from(new Set([...(role.resourceIds ?? []), ...stagedResourceIds])),
+            })),
+            trustedContext: {
+              ...compiled.config.spec.task.spec.trustedContext,
+              resources: [...compiled.config.spec.task.spec.trustedContext.resources, ...stagedSupResources],
+            },
+          },
+        };
+        const finalConfig = {
+          ...compiled.config,
+          spec: {
+            ...compiled.config.spec,
+            registry: {
+              name: finalRegistry.metadata.name,
+              digest: { algorithm: 'sha256' as const, hex: registrySha256 },
+            },
+            task: finalTask,
+          },
+        };
+
+        const configBytes = Buffer.from(serializePrettyYaml(finalConfig), 'utf8');
+        const registryPath = join(registryDir, 'registry.yaml');
+        const configPath = join(configDir, 'config.yaml');
+        await writeFile(registryPath, registryBytes, { mode: 0o600 });
+        await writeFile(configPath, configBytes, { mode: 0o600 });
+        await chmod(registryPath, 0o600);
+        await chmod(configPath, 0o600);
+
+        const writtenSupTaskpack: WrittenCompiledTaskpack = {
+          ...compiled,
+          registry: finalRegistry,
+          registryBytes,
+          registrySha256,
+          config: finalConfig,
+          configBytes,
+          trustedDirectory: trustedDir,
+          registryPath,
+          configPath,
+        };
+
+        const effectiveEnv = buildEffectiveEnv(process.env, ephemeralEnv, taskpackScrubber);
+        const loaded = await loadTrustedConfiguration({
+          configPath,
+          registryPath,
+          registrySha256,
+          untrustedRoots: [workspaceDir],
+          environment: name => (Object.hasOwn(effectiveEnv, name) ? effectiveEnv[name] : undefined),
+        });
+        if (!loaded.ok) {
+          throw new evolution.EvolutionError(
+            'EVOLUTION_STORE_ERROR',
+            `supervisor Pi loadTrustedConfiguration failed: ${loaded.error.code} (${loaded.error.path})`,
+          );
+        }
+
+        const captured: { text: string | null } = { text: null };
+        const supRunId = evolution.sanitizeRunId(`sup-pi-${turn.runId}`);
+        const supControllerRoot = join(piSessionRoot, 'controller');
+        await mkdir(supControllerRoot, { recursive: true, mode: 0o700 });
+
+        await runCycleWithPorts(
+          {
+            configuration: loaded.value,
+            repository: workspaceDir,
+            runRoot: supControllerRoot,
+            runId: supRunId,
+            ...(turn.signal !== undefined ? { signal: turn.signal } : {}),
+          },
+          {
+            policyProfile: 'local',
+            allowWorkflowWrites: false,
+            openAdapter: createEvolutionOpenAdapter({
+              writtenTaskpack: writtenSupTaskpack,
+              effectiveEnv,
+              scrubber: taskpackScrubber,
+              openPiHostSessionAdapterV2,
+              onAfterCapture: async (artifactsDirectory, sessionArtifactName) => {
+                const rawSession = await readFile(join(artifactsDirectory, sessionArtifactName), 'utf8').catch(() => null);
+                if (rawSession !== null) {
+                  const extracted = extractLastAssistantTextFromSessionJsonl(rawSession);
+                  if (extracted !== null) {
+                    captured.text = extracted;
+                  }
+                }
+              },
+            }),
+          },
+        );
+
+        if (captured.text === null || captured.text.trim().length === 0) {
+          throw new evolution.EvolutionError(
+            'EVOLUTION_SCHEMA_INVALID',
+            'read-only Pi supervisor turn produced no assistant TeamPatch response',
+            '/supervisorOutput',
+          );
+        }
+
+        return unwrapOptionalJsonCodeFence(captured.text);
+      },
+    });
+    return runner(context);
   };
 }

@@ -235,6 +235,19 @@ test('evolve-cli: help flags, zero top-level @loopwright/evolution static import
   );
   assert.match(mainSrc, /await import\('@loopwright\/evolution'\)/);
 
+  const evolveSrcPath = fileURLToPath(new URL('../../../../packages/cli/src/evolve.ts', import.meta.url));
+  const evolveSrc = await readFile(evolveSrcPath, 'utf8');
+  assert.equal(
+    /^\s*import\s+(?!type\b)[^;]*@loopwright\/evolution/m.test(evolveSrc),
+    false,
+    'evolve.ts must not perform a top-level runtime import of @loopwright/evolution',
+  );
+  assert.equal(
+    /^\s*import\b[^;]*@loopwright\/agent-pi\/host-session/m.test(evolveSrc),
+    false,
+    'evolve.ts must not perform a top-level static import of @loopwright/agent-pi/host-session',
+  );
+
   const expectedExitCodes: Record<EvolutionErrorCode, number> = {
     EVOLUTION_SCHEMA_INVALID: 2,
     TEAM_ENVELOPE_VIOLATION: 3,
@@ -625,6 +638,7 @@ test('evolve-cli: end-to-end specialist-then-portfolio run, SIGINT pause + resum
           '          accelerator: sm_90a',
           '          isolationMode: whole_device',
           '          deviceCount: 1',
+          '          driverConstraint: ">=550.0"',
           '          forbiddenSymbolPatterns: [cublas, cudnn]',
           '  scope:',
           '    writable: [src/kernels/**]',
@@ -802,7 +816,7 @@ test('evolve-cli: end-to-end specialist-then-portfolio run, SIGINT pause + resum
     assert.equal(inspectMissingIsland.status, 4);
     assert.equal(JSON.parse(inspectMissingIsland.stdout.trim()).data.code, 'EVOLUTION_NOT_FOUND');
 
-    // 5. `evolve export` without --allow-synthetic-probe -> EXPORT_UNVERIFIED_FORBIDDEN (exit 3)
+    // 5a. `evolve export` without --allow-synthetic-probe -> EXPORT_UNVERIFIED_FORBIDDEN (exit 3)
     const ociOutDir = join(root, 'oci-bundle');
     const unverifiedExport = await runCliInProcess([
       'evolve', 'export', '--campaign', campaignStateDir, '--out', ociOutDir, '--format', 'oci-layout', '--json',
@@ -810,7 +824,18 @@ test('evolve-cli: end-to-end specialist-then-portfolio run, SIGINT pause + resum
     assert.equal(unverifiedExport.status, 3, unverifiedExport.stdout + unverifiedExport.stderr);
     assert.equal(JSON.parse(unverifiedExport.stdout.trim()).data.code, 'EXPORT_UNVERIFIED_FORBIDDEN');
 
-    // 6. `evolve export --format oci-layout --allow-synthetic-probe` -> exit 0 + verified OCI bundle
+    // 5b. `evolve export --allow-synthetic-probe` WITHOUT LOOPWRIGHT_GATE_SIGNING_SECRET -> EXPORT_UNVERIFIED_FORBIDDEN (exit 3)
+    const missingSecretExport = await runCliInProcess([
+      'evolve', 'export', '--campaign', campaignStateDir, '--out', ociOutDir, '--format', 'oci-layout', '--allow-synthetic-probe', '--json',
+    ], {
+      ...cliEnv,
+      LOOPWRIGHT_GATE_SIGNING_SECRET: undefined,
+      BENCH_SIGNING_SECRET: undefined,
+    });
+    assert.equal(missingSecretExport.status, 3, missingSecretExport.stdout + missingSecretExport.stderr);
+    assert.equal(JSON.parse(missingSecretExport.stdout.trim()).data.code, 'EXPORT_UNVERIFIED_FORBIDDEN');
+
+    // 6. `evolve export --format oci-layout --allow-synthetic-probe` with HMAC secret -> exit 0 + verified OCI bundle + driverConstraint
     const okExport = await runCliInProcess([
       'evolve', 'export', '--campaign', campaignStateDir, '--out', ociOutDir, '--format', 'oci-layout', '--allow-synthetic-probe', '--json',
     ], cliEnv);
@@ -830,6 +855,7 @@ test('evolve-cli: end-to-end specialist-then-portfolio run, SIGINT pause + resum
       receiptSigningSecret: BENCH_HMAC_SECRET,
     });
     assert.equal(verified.format, 'oci-layout');
+    assert.equal(verified.manifest.compatibility.driverConstraint, '>=550.0');
     assert.equal(verified.dispatchManifest.fallback, 'baseline');
     assert.equal(verified.receiptCount, 3);
     assert.equal(verified.blobCount, 3);
@@ -866,6 +892,800 @@ test('evolve-cli: end-to-end specialist-then-portfolio run, SIGINT pause + resum
     ], cliEnv);
     assert.equal(tamperedExport.status, 4, tamperedExport.stdout + tamperedExport.stderr);
     assert.equal(JSON.parse(tamperedExport.stdout.trim()).data.code, 'ARTIFACT_INVALID');
+  } finally {
+    workerAbort.abort();
+    await workerPromise;
+    await relay.close();
+    await new Promise<void>(resolveClose => sseServer.close(() => resolveClose()));
+    await rm(root, { recursive: true, force: true });
+  }
+  assert.equal(workerFatalError, null);
+});
+
+test('evolve-cli: overlapping --state inside --repo fails closed with EVOLUTION_SCHEMA_INVALID (exit 2)', async () => {
+  const realTmp = await realpath(tmpdir());
+  const root = await mkdtemp(join(realTmp, 'lw-evolve-cli-disjoint-'));
+  try {
+    const repoDir = join(root, 'repo');
+    await initGitRepo(repoDir, {
+      '.loopwright/taskpack.yaml': {
+        content: [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: Taskpack',
+          'metadata:',
+          '  name: cli-disjoint-tp',
+          'spec:',
+          '  goal:',
+          '    candidate: Evolve kernel.',
+          '    noChange: No change.',
+          '  target:',
+          '    matrix:',
+          '      - id: cuda-sm90',
+          '        platform: linux/amd64',
+          '        variant: cuda12',
+          '        hardware:',
+          '          accelerator: sm_90a',
+          '          isolationMode: whole_device',
+          '          deviceCount: 1',
+          '  scope:',
+          '    writable: [src/kernels/**]',
+          '    protected: [scripts/**]',
+          '  models:',
+          '    - provider: local-oai',
+          '      id: mock-model',
+          '      apiKeyEnv: LOCAL_OAI_KEY',
+          '  verification:',
+          '    localChecks:',
+          '      - id: evolve-guard',
+          '        implementation: evolve-block-guard.v1',
+          '        parameters:',
+          '          files: [src/kernels/flash_decode.cu]',
+          '    externalGates:',
+          '      - id: gpu-bench',
+          '        implementation: benchmark-gate.v1',
+          '        endpointId: hw-relay',
+          '        gateId: flash-bench',
+          '        required: true',
+          '        targetCellId: cuda-sm90',
+          '        heldOutWorkloadId: decode-bs1-4k',
+          '        allowSyntheticHardwareProbe: true',
+          '  publication:',
+          '    mode: disabled',
+        ].join('\n'),
+      },
+      '.loopwright/campaign.yaml': {
+        content: [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: EvolutionCampaign',
+          'metadata:',
+          '  name: cli-disjoint-camp',
+          'spec:',
+          '  taskpack: .loopwright/taskpack.yaml',
+          '  targetCellId: cuda-sm90',
+          '  stages:',
+          '    mode: single-target',
+          '  population:',
+          '    islands: 1',
+          '    migrationIntervalGenerations: 2',
+          '    maxMigrationElites: 1',
+          '    nicheAxes:',
+          '      - id: bound_pipeline',
+          '        kind: enum',
+          '        values: [hbm, tensor_cube]',
+          '  sampling:',
+          '    noveltyDecayLambda: 1.0',
+          '    mutationWeights:',
+          '      diff_tune: 0.5',
+          '      full_rewrite: 0.5',
+          '      crossover: 0.0',
+          '    modelBandit: deterministic-round-robin',
+          '    maxCrossoversPerPrompt: 1',
+          '  objectives:',
+          '    - metric: latency_us_p50',
+          '      direction: minimize',
+          '  budgets:',
+          '    maxGenerations: 1',
+          '    maxEvaluations: 1',
+          '    maxConcurrentEvaluations: 1',
+          '    scratchpadIntervalGenerations: 1',
+        ].join('\n'),
+      },
+      'src/kernels/flash_decode.cu': { content: BASELINE_KERNEL_SOURCE },
+    });
+
+    const overlapRes = await runCliInProcess([
+      'evolve', 'run',
+      '--campaign', join(repoDir, '.loopwright', 'campaign.yaml'),
+      '--state', join(repoDir, 'campaign-state'),
+      '--repo', repoDir,
+      '--json',
+    ], { PATH: '/usr/bin:/bin', LOCAL_OAI_KEY });
+    assert.equal(overlapRes.status, 2, overlapRes.stdout + overlapRes.stderr);
+    const env = JSON.parse(overlapRes.stdout.trim()) as { kind: string; data: { code: string } };
+    assert.equal(env.kind, 'diagnostic');
+    assert.equal(env.data.code, 'EVOLUTION_SCHEMA_INVALID');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('evolve-cli: teamEvolution.enabled triggers isolated read-only LocalRunStore Pi supervisor on stall', { timeout: 120000 }, async () => {
+  const realTmp = await realpath(tmpdir());
+  const root = await mkdtemp(join(realTmp, 'lw-evolve-cli-team-sup-'));
+
+  const relayCasDir = join(root, 'relay-cas');
+  const workerWorkDir = join(root, 'worker-work');
+  const workloadsDir = join(root, 'workloads');
+  await mkdir(workerWorkDir, { recursive: true, mode: 0o700 });
+  await mkdir(join(workloadsDir, 'decode-bs1-4k'), { recursive: true, mode: 0o700 });
+
+  const evalScript = [
+    `#!${process.execPath}`,
+    'const payload = {',
+    '  status: "approved",',
+    '  metrics: { latency_us_p50: 40, goodput_rps: 2000, max_ulp: 1 },',
+    '  bucketMetrics: [',
+    '    { bucketId: "decode-bs1-4k", dimensions: { bs: 1 }, metrics: { latency_us_p50: 40, goodput_rps: 2000, max_ulp: 1 } }',
+    '  ],',
+    '  hardwareDiagnostics: { boundPipeline: "tensor_cube", occupancyPct: 75, rooflineHeadroom: 1.25 }',
+    '};',
+    'process.stdout.write("LOOPWRIGHT_STAGE_B_RESULT:" + JSON.stringify(payload) + "\\n");',
+    '',
+  ].join('\n');
+  const evalPath = join(workloadsDir, 'decode-bs1-4k', 'evaluate.sh');
+  await writeFile(evalPath, evalScript, { mode: 0o755 });
+  await chmod(evalPath, 0o755);
+
+  const cubinHex = buildElf64Cubin(['flash_decode_team_sm90a']).toString('hex');
+  const buildScript = [
+    `#!${process.execPath}`,
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    'const outDir = process.env.LOOPWRIGHT_STAGE_A_OUT;',
+    `fs.writeFileSync(path.join(outDir, "team_kernel.cubin"), Buffer.from(${JSON.stringify(cubinHex)}, "hex"));`,
+    '',
+  ].join('\n');
+
+  const relay = await startRelayServer({
+    port: 0,
+    casDir: relayCasDir,
+    controllerSigningSecret: BENCH_HMAC_SECRET,
+    workerTokens: [WORKER_BEARER_TOKEN],
+    leaseTtlMs: 15_000,
+    sweepIntervalMs: 150,
+  });
+
+  const workerAbort = new AbortController();
+  let workerFatalError: unknown = null;
+  const workerPromise = runHardwareWorker({
+    config: {
+      workerId: 'evolve-cli-team-worker',
+      relayUrl: relay.url,
+      workerToken: WORKER_BEARER_TOKEN,
+      workDir: workerWorkDir,
+      heldOutWorkloadsDir: workloadsDir,
+      sandboxBackend: 'native_os',
+      capabilities: {
+        accelerator: 'sm_90a',
+        isolationModes: ['whole_device'],
+        deviceCount: 1,
+        driverVersion: '550.90.07',
+        workloadIds: ['decode-bs1-4k'],
+      },
+      pollWaitMs: 40,
+      heartbeatIntervalMs: 50,
+      requestTimeoutMs: 5_000,
+      stageATimeoutMs: 15_000,
+      stageBTimeoutMs: 15_000,
+      toolchainPaths: [join(process.execPath, '..')],
+      probeMode: 'synthetic_fixture',
+    } satisfies WorkerConfig,
+    once: false,
+    signal: workerAbort.signal,
+    registerProcessSignalHandlers: false,
+  }).catch((err: unknown) => {
+    if (!workerAbort.signal.aborted) workerFatalError = err;
+  });
+
+  let mutateTurn = 0;
+  let supervisorCalls = 0;
+  let probeRoleCalls = 0;
+  const synthesizedTeamPatch = {
+    kind: 'TeamPatch',
+    schemaVersion: 'team-patch.v1',
+    diagnosis: {
+      summary: 'Island stalled on flat HBM roofline; split read-only probe from mutator',
+      plateauCategory: 'coupled_responsibilities',
+      rationale: 'Add a read-only probe step before mutating flash_decode.cu',
+    },
+    roles: [
+      {
+        id: 'probe-worker',
+        archetypeRoleId: 'probe-readonly',
+        purpose: 'task',
+        tools: ['read'],
+        model: 'mock-model',
+        prompt: 'Inspect kernel bottleneck in read-only mode.',
+      },
+      {
+        id: 'mutator-worker',
+        archetypeRoleId: 'mutator',
+        purpose: 'task',
+        tools: ['read', 'write', 'edit'],
+        model: 'mock-model',
+        prompt: 'Mutate src/kernels/flash_decode.cu inside EVOLVE-BLOCK markers.',
+      },
+    ],
+    steps: [
+      { id: 'step-probe', roleId: 'probe-worker', dependsOn: [] },
+      { id: 'step-mutate', roleId: 'mutator-worker', dependsOn: ['step-probe'] },
+    ],
+  };
+
+  const sseServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      const bodyText = Buffer.concat(chunks).toString('utf8');
+      const parsedBody = JSON.parse(bodyText) as {
+        readonly messages?: readonly { readonly role?: string }[];
+      };
+      const isAfterTool = parsedBody.messages?.some(m => m.role === 'tool') ?? false;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+
+      if (bodyText.includes('Diagnose island 0 plateau')) {
+        supervisorCalls += 1;
+        assert.equal(bodyText.includes('decode-bs1-4k'), false, 'heldOutWorkloadId must never enter Pi supervisor prompt');
+        const supChunk = {
+          id: `chatcmpl-sup-${supervisorCalls}`,
+          object: 'chat.completion.chunk',
+          choices: [{
+            index: 0,
+            delta: { role: 'assistant', content: JSON.stringify(synthesizedTeamPatch) },
+            finish_reason: 'stop',
+          }],
+          usage: { prompt_tokens: 30, completion_tokens: 40, total_tokens: 70 },
+        };
+        res.end(`data: ${JSON.stringify(supChunk)}\n\ndata: [DONE]\n\n`);
+        return;
+      }
+
+      if (bodyText.includes('Inspect kernel bottleneck in read-only mode.')) {
+        probeRoleCalls += 1;
+        const probeChunk = {
+          id: `chatcmpl-probe-${probeRoleCalls}`,
+          object: 'chat.completion.chunk',
+          choices: [{
+            index: 0,
+            delta: {
+              role: 'assistant',
+              content: '{"version":1,"status":"completed","checks":[],"reason":"probe completed read-only analysis"}',
+            },
+            finish_reason: 'stop',
+          }],
+          usage: { prompt_tokens: 20, completion_tokens: 15, total_tokens: 35 },
+        };
+        res.end(`data: ${JSON.stringify(probeChunk)}\n\ndata: [DONE]\n\n`);
+        return;
+      }
+
+      if (!isAfterTool) {
+        mutateTurn += 1;
+        const nextKernel = BASELINE_KERNEL_SOURCE.replace('return 0; // baseline', `return ${mutateTurn * 10 + 1}; // team_gen_${mutateTurn}`);
+        const toolChunk = {
+          id: `chatcmpl-mut-tool-${mutateTurn}`,
+          object: 'chat.completion.chunk',
+          choices: [{
+            index: 0,
+            delta: {
+              role: 'assistant',
+              tool_calls: [{
+                index: 0,
+                id: `call_team_write_${mutateTurn}`,
+                type: 'function',
+                function: {
+                  name: 'write',
+                  arguments: JSON.stringify({ path: 'src/kernels/flash_decode.cu', content: nextKernel }),
+                },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+          usage: { prompt_tokens: 20, completion_tokens: 15, total_tokens: 35 },
+        };
+        res.end(`data: ${JSON.stringify(toolChunk)}\n\ndata: [DONE]\n\n`);
+        return;
+      }
+
+      const doneChunk = {
+        id: `chatcmpl-mut-done-${mutateTurn}`,
+        object: 'chat.completion.chunk',
+        choices: [{
+          index: 0,
+          delta: {
+            role: 'assistant',
+            content: '{"version":1,"status":"completed","checks":[],"reason":"mutated kernel"}',
+          },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+      };
+      res.end(`data: ${JSON.stringify(doneChunk)}\n\ndata: [DONE]\n\n`);
+    });
+  });
+  await new Promise<void>(resolveListen => sseServer.listen(0, '127.0.0.1', () => resolveListen()));
+  const ssePort = (sseServer.address() as { port: number }).port;
+
+  try {
+    const modelsJsonPath = join(root, 'models.json');
+    await writeFile(
+      modelsJsonPath,
+      JSON.stringify({
+        providers: {
+          'local-oai': {
+            baseUrl: `http://127.0.0.1:${ssePort}/v1`,
+            api: 'openai-completions',
+            apiKey: 'LOCAL_OAI_KEY',
+            models: [{ id: 'mock-model', contextWindow: 128_000, maxTokens: 4_096 }],
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const repoDir = join(root, 'repo');
+    await initGitRepo(repoDir, {
+      '.loopwright/taskpack.yaml': {
+        content: [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: Taskpack',
+          'metadata:',
+          '  name: cli-team-sup-tp',
+          'spec:',
+          '  goal:',
+          '    candidate: Evolve flash decode kernel inside EVOLVE-BLOCK markers.',
+          '    noChange: No kernel change needed.',
+          '  target:',
+          '    matrix:',
+          '      - id: cuda-sm90',
+          '        platform: linux/amd64',
+          '        variant: cuda12',
+          '        hardware:',
+          '          accelerator: sm_90a',
+          '          isolationMode: whole_device',
+          '          deviceCount: 1',
+          '  scope:',
+          '    writable: [src/kernels/**]',
+          '    protected: [scripts/**]',
+          '  models:',
+          '    - provider: local-oai',
+          '      id: mock-model',
+          '      apiKeyEnv: LOCAL_OAI_KEY',
+          '  roles:',
+          '    - id: mutator',
+          '      provider: local-oai',
+          '      model: mock-model',
+          '      purpose: task',
+          '      tools: [read, write, edit]',
+          '      prompt: Mutate src/kernels/flash_decode.cu inside EVOLVE-BLOCK markers.',
+          '    - id: probe-readonly',
+          '      provider: local-oai',
+          '      model: mock-model',
+          '      purpose: task',
+          '      tools: [read]',
+          '      prompt: Read-only probe archetype.',
+          '    - id: supervisor',
+          '      provider: local-oai',
+          '      model: mock-model',
+          '      purpose: task',
+          '      tools: [read]',
+          '      prompt: Read-only plateau supervisor.',
+          '  verification:',
+          '    localChecks:',
+          '      - id: evolve-guard',
+          '        implementation: evolve-block-guard.v1',
+          '        parameters:',
+          '          files: [src/kernels/flash_decode.cu]',
+          '    externalGates:',
+          '      - id: gpu-bench',
+          '        implementation: benchmark-gate.v1',
+          '        endpointId: hw-relay',
+          '        gateId: flash-decode-bench',
+          '        required: true',
+          '        targetCellId: cuda-sm90',
+          '        heldOutWorkloadId: decode-bs1-4k',
+          '        allowSyntheticHardwareProbe: true',
+          '  publication:',
+          '    mode: disabled',
+        ].join('\n'),
+      },
+      '.loopwright/campaign.yaml': {
+        content: [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: EvolutionCampaign',
+          'metadata:',
+          '  name: cli-team-sup-camp',
+          'spec:',
+          '  taskpack: .loopwright/taskpack.yaml',
+          '  targetCellId: cuda-sm90',
+          '  stages:',
+          '    mode: single-target',
+          '  population:',
+          '    islands: 1',
+          '    migrationIntervalGenerations: 4',
+          '    maxMigrationElites: 1',
+          '    nicheAxes:',
+          '      - id: bound_pipeline',
+          '        kind: enum',
+          '        values: [hbm, tensor_cube]',
+          '  sampling:',
+          '    noveltyDecayLambda: 1.0',
+          '    mutationWeights:',
+          '      diff_tune: 0.5',
+          '      full_rewrite: 0.5',
+          '      crossover: 0.0',
+          '    modelBandit: deterministic-round-robin',
+          '    maxCrossoversPerPrompt: 1',
+          '  teamEvolution:',
+          '    enabled: true',
+          '    supervisorRoleId: supervisor',
+          '    allowedArchetypeRoles: [probe-readonly, mutator]',
+          '    stallGenerations: 1',
+          '    trialGenerations: 2',
+          '    maxTeamSize: 2',
+          '    maxTeamSteps: 2',
+          '  objectives:',
+          '    - metric: latency_us_p50',
+          '      direction: minimize',
+          '  budgets:',
+          '    maxGenerations: 3',
+          '    maxEvaluations: 6',
+          '    maxConcurrentEvaluations: 1',
+          '    scratchpadIntervalGenerations: 5',
+        ].join('\n'),
+      },
+      'src/kernels/flash_decode.cu': { content: BASELINE_KERNEL_SOURCE },
+      'scripts/build.sh': { content: buildScript, executable: true },
+    });
+
+    const stateDir = join(root, 'campaign-state');
+    const cliEnv = {
+      PATH: '/usr/bin:/bin',
+      LOOPWRIGHT_MODELS_JSON: modelsJsonPath,
+      LOOPWRIGHT_ALLOW_MANIFEST_CUSTOM_BASE_URL: 'true',
+      LOOPWRIGHT_BENCHMARK_GATE_URL: `${relay.url}/v1/benchmark/jobs`,
+      LOOPWRIGHT_GATE_SIGNING_SECRET: BENCH_HMAC_SECRET,
+      LOCAL_OAI_KEY,
+    };
+
+    const runRes = await runCliInProcess([
+      'evolve', 'run',
+      '--campaign', join(repoDir, '.loopwright', 'campaign.yaml'),
+      '--state', stateDir,
+      '--repo', repoDir,
+      '--allow-synthetic-probe',
+      '--json',
+    ], cliEnv);
+    assert.equal(runRes.status, 0, runRes.stdout + runRes.stderr);
+    assert.equal(supervisorCalls, 1, 'isolated read-only Pi supervisor must trigger exactly once on stall');
+    assert.ok(probeRoleCalls >= 1, 'synthesized read-only probe role must execute on subsequent trial generation');
+
+    const inspectRes = await runCliInProcess(['evolve', 'inspect', '--campaign', stateDir, '--json'], cliEnv);
+    assert.equal(inspectRes.status, 0, inspectRes.stdout + inspectRes.stderr);
+    const inspectEnv = JSON.parse(inspectRes.stdout.trim()) as {
+      data: {
+        teamConfigs: readonly { teamConfigId: string; status: string; patchCasDigest: unknown }[];
+      };
+    };
+    assert.equal(inspectEnv.data.teamConfigs.length, 2, 'incumbent + synthesized trial team must be recorded');
+    assert.ok(inspectEnv.data.teamConfigs.some(tc => tc.patchCasDigest !== null));
+  } finally {
+    workerAbort.abort();
+    await workerPromise;
+    await relay.close();
+    await new Promise<void>(resolveClose => sseServer.close(() => resolveClose()));
+    await rm(root, { recursive: true, force: true });
+  }
+  assert.equal(workerFatalError, null);
+});
+
+test('evolve-cli: exact whitespace/comment clone edit is rejected with NOVELTY_CLONE_REJECTED and 0 hardware benchmark dispatches', { timeout: 120000 }, async () => {
+  const realTmp = await realpath(tmpdir());
+  const root = await mkdtemp(join(realTmp, 'lw-evolve-cli-novelty-'));
+
+  const relayCasDir = join(root, 'relay-cas');
+  const workerWorkDir = join(root, 'worker-work');
+  const workloadsDir = join(root, 'workloads');
+  await mkdir(workerWorkDir, { recursive: true, mode: 0o700 });
+  await mkdir(join(workloadsDir, 'decode-bs1-4k'), { recursive: true, mode: 0o700 });
+
+  const evalScript = [
+    `#!${process.execPath}`,
+    'const payload = {',
+    '  status: "approved",',
+    '  metrics: { latency_us_p50: 32, goodput_rps: 2800, max_ulp: 1 },',
+    '  bucketMetrics: [',
+    '    { bucketId: "decode-bs1-4k", dimensions: { bs: 1 }, metrics: { latency_us_p50: 32, goodput_rps: 2800, max_ulp: 1 } }',
+    '  ],',
+    '  hardwareDiagnostics: { boundPipeline: "tensor_cube", occupancyPct: 80, rooflineHeadroom: 1.15 }',
+    '};',
+    'process.stdout.write("LOOPWRIGHT_STAGE_B_RESULT:" + JSON.stringify(payload) + "\\n");',
+    '',
+  ].join('\n');
+  const evalPath = join(workloadsDir, 'decode-bs1-4k', 'evaluate.sh');
+  await writeFile(evalPath, evalScript, { mode: 0o755 });
+  await chmod(evalPath, 0o755);
+
+  const cubinHex = buildElf64Cubin(['flash_decode_novelty_sm90a']).toString('hex');
+  const buildScript = [
+    `#!${process.execPath}`,
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    'const outDir = process.env.LOOPWRIGHT_STAGE_A_OUT;',
+    `fs.writeFileSync(path.join(outDir, "novelty_kernel.cubin"), Buffer.from(${JSON.stringify(cubinHex)}, "hex"));`,
+    '',
+  ].join('\n');
+
+  const relay = await startRelayServer({
+    port: 0,
+    casDir: relayCasDir,
+    controllerSigningSecret: BENCH_HMAC_SECRET,
+    workerTokens: [WORKER_BEARER_TOKEN],
+    leaseTtlMs: 15_000,
+    sweepIntervalMs: 150,
+  });
+
+  let workerJobsProcessed = 0;
+  const workerAbort = new AbortController();
+  let workerFatalError: unknown = null;
+  const workerPromise = runHardwareWorker({
+    config: {
+      workerId: 'evolve-cli-novelty-worker',
+      relayUrl: relay.url,
+      workerToken: WORKER_BEARER_TOKEN,
+      workDir: workerWorkDir,
+      heldOutWorkloadsDir: workloadsDir,
+      sandboxBackend: 'native_os',
+      capabilities: {
+        accelerator: 'sm_90a',
+        isolationModes: ['whole_device'],
+        deviceCount: 1,
+        driverVersion: '550.90.07',
+        workloadIds: ['decode-bs1-4k'],
+      },
+      pollWaitMs: 40,
+      heartbeatIntervalMs: 50,
+      requestTimeoutMs: 5_000,
+      stageATimeoutMs: 15_000,
+      stageBTimeoutMs: 15_000,
+      toolchainPaths: [join(process.execPath, '..')],
+      probeMode: 'synthetic_fixture',
+    } satisfies WorkerConfig,
+    once: false,
+    signal: workerAbort.signal,
+    registerProcessSignalHandlers: false,
+    onJobSettled: () => {
+      workerJobsProcessed += 1;
+    },
+  }).catch((err: unknown) => {
+    if (!workerAbort.signal.aborted) workerFatalError = err;
+  });
+
+  let sseTurn = 0;
+  const sseServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      const parsedBody = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+        readonly messages?: readonly { readonly role?: string }[];
+      };
+      const isAfterTool = parsedBody.messages?.some(m => m.role === 'tool') ?? false;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (!isAfterTool) {
+        sseTurn += 1;
+        // Gen 1 writes return 42; Gen 2 writes an exact whitespace/comment clone of Gen 1!
+        const nextKernel = sseTurn === 1
+          ? BASELINE_KERNEL_SOURCE.replace('return 0; // baseline', 'return 42; // gen 1 original')
+          : BASELINE_KERNEL_SOURCE.replace('return 0; // baseline', '  return   42; /* gen 2 whitespace/comment clone */');
+        const toolChunk = {
+          id: `chatcmpl-nov-tool-${sseTurn}`,
+          object: 'chat.completion.chunk',
+          choices: [{
+            index: 0,
+            delta: {
+              role: 'assistant',
+              tool_calls: [{
+                index: 0,
+                id: `call_nov_write_${sseTurn}`,
+                type: 'function',
+                function: {
+                  name: 'write',
+                  arguments: JSON.stringify({ path: 'src/kernels/flash_decode.cu', content: nextKernel }),
+                },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+          usage: { prompt_tokens: 20, completion_tokens: 15, total_tokens: 35 },
+        };
+        res.end(`data: ${JSON.stringify(toolChunk)}\n\ndata: [DONE]\n\n`);
+        return;
+      }
+
+      const doneChunk = {
+        id: `chatcmpl-nov-done-${sseTurn}`,
+        object: 'chat.completion.chunk',
+        choices: [{
+          index: 0,
+          delta: {
+            role: 'assistant',
+            content: '{"version":1,"status":"completed","checks":[],"reason":"wrote kernel variant"}',
+          },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+      };
+      res.end(`data: ${JSON.stringify(doneChunk)}\n\ndata: [DONE]\n\n`);
+    });
+  });
+  await new Promise<void>(resolveListen => sseServer.listen(0, '127.0.0.1', () => resolveListen()));
+  const ssePort = (sseServer.address() as { port: number }).port;
+
+  try {
+    const modelsJsonPath = join(root, 'models.json');
+    await writeFile(
+      modelsJsonPath,
+      JSON.stringify({
+        providers: {
+          'local-oai': {
+            baseUrl: `http://127.0.0.1:${ssePort}/v1`,
+            api: 'openai-completions',
+            apiKey: 'LOCAL_OAI_KEY',
+            models: [{ id: 'mock-model', contextWindow: 128_000, maxTokens: 4_096 }],
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const repoDir = join(root, 'repo');
+    await initGitRepo(repoDir, {
+      '.loopwright/taskpack.yaml': {
+        content: [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: Taskpack',
+          'metadata:',
+          '  name: cli-novelty-tp',
+          'spec:',
+          '  goal:',
+          '    candidate: Evolve flash decode kernel inside EVOLVE-BLOCK markers.',
+          '    noChange: No kernel change needed.',
+          '  target:',
+          '    matrix:',
+          '      - id: cuda-sm90',
+          '        platform: linux/amd64',
+          '        variant: cuda12',
+          '        hardware:',
+          '          accelerator: sm_90a',
+          '          isolationMode: whole_device',
+          '          deviceCount: 1',
+          '  scope:',
+          '    writable: [src/kernels/**]',
+          '    protected: [scripts/**]',
+          '  models:',
+          '    - provider: local-oai',
+          '      id: mock-model',
+          '      apiKeyEnv: LOCAL_OAI_KEY',
+          '  roles:',
+          '    - id: mutator',
+          '      provider: local-oai',
+          '      model: mock-model',
+          '      purpose: task',
+          '      tools: [read, write, edit]',
+          '      prompt: Mutate src/kernels/flash_decode.cu inside EVOLVE-BLOCK markers.',
+          '  verification:',
+          '    localChecks:',
+          '      - id: evolve-guard',
+          '        implementation: evolve-block-guard.v1',
+          '        parameters:',
+          '          files: [src/kernels/flash_decode.cu]',
+          '    externalGates:',
+          '      - id: gpu-bench',
+          '        implementation: benchmark-gate.v1',
+          '        endpointId: hw-relay',
+          '        gateId: flash-decode-bench',
+          '        required: true',
+          '        targetCellId: cuda-sm90',
+          '        heldOutWorkloadId: decode-bs1-4k',
+          '        allowSyntheticHardwareProbe: true',
+          '  publication:',
+          '    mode: disabled',
+        ].join('\n'),
+      },
+      '.loopwright/campaign.yaml': {
+        content: [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: EvolutionCampaign',
+          'metadata:',
+          '  name: cli-novelty-camp',
+          'spec:',
+          '  taskpack: .loopwright/taskpack.yaml',
+          '  targetCellId: cuda-sm90',
+          '  stages:',
+          '    mode: single-target',
+          '  population:',
+          '    islands: 1',
+          '    migrationIntervalGenerations: 4',
+          '    maxMigrationElites: 1',
+          '    nicheAxes:',
+          '      - id: bound_pipeline',
+          '        kind: enum',
+          '        values: [hbm, tensor_cube]',
+          '  sampling:',
+          '    noveltyDecayLambda: 1.0',
+          '    mutationWeights:',
+          '      diff_tune: 0.5',
+          '      full_rewrite: 0.5',
+          '      crossover: 0.0',
+          '    modelBandit: deterministic-round-robin',
+          '    maxCrossoversPerPrompt: 1',
+          '  objectives:',
+          '    - metric: latency_us_p50',
+          '      direction: minimize',
+          '  budgets:',
+          '    maxGenerations: 2',
+          '    maxEvaluations: 4',
+          '    maxConcurrentEvaluations: 1',
+          '    scratchpadIntervalGenerations: 5',
+        ].join('\n'),
+      },
+      'src/kernels/flash_decode.cu': { content: BASELINE_KERNEL_SOURCE },
+      'scripts/build.sh': { content: buildScript, executable: true },
+    });
+
+    const stateDir = join(root, 'campaign-state');
+    const cliEnv = {
+      PATH: '/usr/bin:/bin',
+      LOOPWRIGHT_MODELS_JSON: modelsJsonPath,
+      LOOPWRIGHT_ALLOW_MANIFEST_CUSTOM_BASE_URL: 'true',
+      LOOPWRIGHT_BENCHMARK_GATE_URL: `${relay.url}/v1/benchmark/jobs`,
+      LOOPWRIGHT_GATE_SIGNING_SECRET: BENCH_HMAC_SECRET,
+      LOCAL_OAI_KEY,
+    };
+
+    const runRes = await runCliInProcess([
+      'evolve', 'run',
+      '--campaign', join(repoDir, '.loopwright', 'campaign.yaml'),
+      '--state', stateDir,
+      '--repo', repoDir,
+      '--allow-synthetic-probe',
+      '--json',
+    ], cliEnv);
+    assert.equal(runRes.status, 0, runRes.stdout + runRes.stderr);
+    assert.equal(workerJobsProcessed, 1, 'clone candidate must trigger 0 hardware benchmark dispatches');
+
+    const runEnv = JSON.parse(runRes.stdout.trim()) as {
+      data: {
+        campaign: { evaluationsUsed: number };
+        noveltyRejectionsCount: number;
+      };
+    };
+    assert.equal(runEnv.data.noveltyRejectionsCount, 1);
+    assert.equal(runEnv.data.campaign.evaluationsUsed, 1, 'NOVELTY_CLONE_REJECTED must not consume evaluation budget');
+
+    const inspectRes = await runCliInProcess(['evolve', 'inspect', '--campaign', stateDir, '--json'], cliEnv);
+    assert.equal(inspectRes.status, 0, inspectRes.stdout + inspectRes.stderr);
+    const inspectEnv = JSON.parse(inspectRes.stdout.trim()) as {
+      data: {
+        individuals: readonly { status: string; failureReason: string | null }[];
+      };
+    };
+    assert.equal(inspectEnv.data.individuals.length, 2);
+    assert.equal(inspectEnv.data.individuals.filter(i => i.status === 'passed').length, 1);
+    assert.equal(
+      inspectEnv.data.individuals.filter(i => i.status === 'failed' && i.failureReason === 'NOVELTY_CLONE_REJECTED').length,
+      1,
+    );
   } finally {
     workerAbort.abort();
     await workerPromise;

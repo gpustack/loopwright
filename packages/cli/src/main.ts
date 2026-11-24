@@ -2020,7 +2020,7 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
       }
     }
 
-    const { createCliEvolutionEvaluator } = await import('./evolve.js');
+    const { createCliEvolutionEvaluator, createCliEvolutionSupervisorRunner } = await import('./evolve.js');
     const repositoryRoot = resolve(args.values.has('repo') ? get('repo') : process.cwd());
     const allowSyntheticProbe = args.flags.has('allow-synthetic-probe');
     const receiptSigningSecret = resolveSigningSecret();
@@ -2029,12 +2029,18 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
     const evaluator = createCliEvolutionEvaluator({ repositoryRoot, coreScrubber, taskpackScrubber: scrubber });
 
     const { runResult, exportedBundle, caughtSignal } = await withSignalAbort(async (signal, getSignal) => {
+      const supervisorRunner = createCliEvolutionSupervisorRunner({
+        coreScrubber,
+        taskpackScrubber: scrubber,
+        signal,
+      });
       const res = action === 'run'
         ? await evolution.runEvolutionCampaign({
             campaignRoot: resolveStateDir(),
             manifestPath: resolve(get('campaign')),
             repositoryRoot,
             evaluator,
+            supervisorRunner,
             signal,
             autoExport: outDir === undefined,
             allowSyntheticProbe,
@@ -2045,6 +2051,7 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
             campaignRoot: resolveCampaignDir(),
             repositoryRoot,
             evaluator,
+            supervisorRunner,
             signal,
             autoExport: outDir === undefined,
             allowSyntheticProbe,
@@ -2061,7 +2068,7 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
             outputDir: outDir,
             ...(format !== undefined ? { format } : {}),
             allowSyntheticProbe,
-            overwrite: true,
+            overwrite: false,
             ...(receiptSigningSecret !== undefined ? { receiptSigningSecret } : {}),
             scrubber: coreScrubber,
           });
