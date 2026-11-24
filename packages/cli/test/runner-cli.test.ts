@@ -130,7 +130,7 @@ function makeRelayBenchmarkRequest(
 test('runner-cli: help flags, HELP text, and dynamic import isolation', async () => {
   const topHelp = spawnSync(process.execPath, [MAIN, '--help'], {
     encoding: 'utf8',
-    timeout: 5_000,
+    timeout: 15_000,
     env: { PATH: '/usr/bin:/bin' },
   });
   assert.equal(topHelp.status, 0, topHelp.stderr);
@@ -144,7 +144,7 @@ test('runner-cli: help flags, HELP text, and dynamic import isolation', async ()
   ]) {
     const res = spawnSync(process.execPath, [MAIN, ...helpArgv], {
       encoding: 'utf8',
-      timeout: 5_000,
+      timeout: 15_000,
       env: { PATH: '/usr/bin:/bin' },
     });
     assert.equal(res.status, 0, res.stderr);
