@@ -568,7 +568,7 @@ export function createCliEvolutionEvaluator(options: {
         ...(extGate.authCredentialRef !== undefined ? { authCredentialRef: extGate.authCredentialRef } : {}),
         implementation: 'benchmark-gate.v1',
         timeoutMs: 10_000,
-        maxPollMs: 30_000,
+        maxPollMs: 120_000,
         pollInitialMs: 100,
         pollMaxMs: 500,
         jitter: 25,
