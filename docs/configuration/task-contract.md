@@ -358,7 +358,7 @@ spec:
 
 | Field path | Required | Bounds and defaults | Behavior |
 | --- | --- | --- | --- |
-| `spec.heldOutWorkloadId` | No | Bucket ID (`1..64` chars) | Single-target holdout workload ID override |
+| `spec.heldOutWorkloadId` | No | Identifier (`1..64` chars) | Single-target holdout workload ID override |
 | `spec.tracks` | No | `1..32` unique IDs | Candidate implementation tracks (`cuda_raw`, `cute`, `triton`) |
 | `spec.stages` | No | `single-target` (default) or `specialist-then-portfolio` | `specialistBuckets` (`1..64`) + `portfolioHeldOutWorkloadId` |
 | `spec.population` | Yes | `islands` `1..16`, `migrationIntervalGenerations` `1..1024`, `maxMigrationElites` `0..16` | Ring-topology island archive and migration cadence |

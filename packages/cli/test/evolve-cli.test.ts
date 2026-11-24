@@ -9,14 +9,18 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   EVOLUTION_ERROR_CODES,
+  parseEvolutionCampaignDocument,
   verifyEvolutionBundle,
   type EvolutionErrorCode,
 } from '@loopwright/evolution';
+import { SecretScrubber } from '@loopwright/core';
+import { SecretScrubber as TaskpackSecretScrubber, loadDeclarativeTaskpack } from '@loopwright/taskpack';
 import {
   runHardwareWorker,
   startRelayServer,
   type WorkerConfig,
 } from '@loopwright/hardware-runner';
+import { createCliEvolutionEvaluator } from '../src/evolve.js';
 import { evolutionExitCode, main as cliMain } from '../src/main.js';
 
 const MAIN = fileURLToPath(new URL('../src/main.js', import.meta.url));
@@ -1694,4 +1698,251 @@ test('evolve-cli: exact whitespace/comment clone edit is rejected with NOVELTY_C
     await rm(root, { recursive: true, force: true });
   }
   assert.equal(workerFatalError, null);
+});
+
+test('evolve-cli: 1-role cross-provider TeamPatch binds OPENAI_API_KEY and never leaks ANTHROPIC_API_KEY to openai endpoint', async () => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'lw-evolve-cli-xprov-'));
+  const observedOpenAiAuths: string[] = [];
+  const sseServer = createServer((req, res) => {
+    const auth = req.headers.authorization ?? '';
+    if (req.url?.startsWith('/openai/')) {
+      observedOpenAiAuths.push(auth);
+    }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const doneChunk = {
+        id: 'chatcmpl-xprov-1',
+        object: 'chat.completion.chunk',
+        choices: [{
+          index: 0,
+          delta: {
+            role: 'assistant',
+            content: '{"version":1,"status":"no_change","checks":[],"reason":"checked cross-provider auth"}',
+          },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+      };
+      res.end(`data: ${JSON.stringify(doneChunk)}\n\ndata: [DONE]\n\n`);
+    });
+  });
+  await new Promise<void>(resolveListen => sseServer.listen(0, '127.0.0.1', () => resolveListen()));
+  const ssePort = (sseServer.address() as { port: number }).port;
+
+  const prevAnth = process.env['ANTHROPIC_API_KEY'];
+  const prevOai = process.env['OPENAI_API_KEY'];
+  const prevModelsJson = process.env['LOOPWRIGHT_MODELS_JSON'];
+  const prevAllowCustomUrl = process.env['LOOPWRIGHT_ALLOW_MANIFEST_CUSTOM_BASE_URL'];
+  const prevBenchUrl = process.env['LOOPWRIGHT_BENCHMARK_GATE_URL'];
+  const prevGateSecret = process.env['LOOPWRIGHT_GATE_SIGNING_SECRET'];
+
+  try {
+    const modelsJsonPath = join(root, 'models.json');
+    await writeFile(
+      modelsJsonPath,
+      JSON.stringify({
+        providers: {
+          anthropic: {
+            baseUrl: `http://127.0.0.1:${ssePort}/anthropic`,
+            api: 'openai-completions',
+            models: [{ id: 'claude-sonnet-4-6', contextWindow: 128_000, maxTokens: 4_096 }],
+          },
+          openai: {
+            baseUrl: `http://127.0.0.1:${ssePort}/openai`,
+            api: 'openai-completions',
+            models: [{ id: 'gpt-5.4', contextWindow: 128_000, maxTokens: 4_096 }],
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const taskpackYaml = [
+      'apiVersion: loopwright.dev/v1alpha1',
+      'kind: Taskpack',
+      'metadata:',
+      '  name: xprov-tp',
+      'spec:',
+      '  goal:',
+      '    candidate: Optimize decode kernel.',
+      '    noChange: No change.',
+      '  target:',
+      '    matrix:',
+      '      - id: cuda-sm90',
+      '        platform: linux/amd64',
+      '        variant: cuda12',
+      '        hardware:',
+      '          accelerator: sm_90a',
+      '          isolationMode: whole_device',
+      '          deviceCount: 1',
+      '  scope:',
+      '    writable: [src/kernels/**]',
+      '    protected: [scripts/**]',
+      '  models:',
+      '    - provider: anthropic',
+      '      id: claude-sonnet-4-6',
+      '    - provider: openai',
+      '      id: gpt-5.4',
+      '  roles:',
+      '    - id: mutator',
+      '      provider: anthropic',
+      '      model: claude-sonnet-4-6',
+      '      purpose: task',
+      '      tools: [read, edit]',
+      '      prompt: Edit kernel.',
+      '  verification:',
+      '    localChecks:',
+      '      - id: evolve-guard',
+      '        implementation: evolve-block-guard.v1',
+      '        parameters:',
+      '          files: [src/kernels/flash_decode.cu]',
+      '    externalGates:',
+      '      - id: gpu-bench',
+      '        implementation: benchmark-gate.v1',
+      '        endpointId: hw-relay',
+      '        gateId: flash-decode-bench',
+      '        required: true',
+      '        targetCellId: cuda-sm90',
+      '        heldOutWorkloadId: decode-bs1-4k',
+      '        allowSyntheticHardwareProbe: true',
+      '  publication:',
+      '    mode: disabled',
+    ].join('\n');
+
+    const campaignYaml = [
+      'apiVersion: loopwright.dev/v1alpha1',
+      'kind: EvolutionCampaign',
+      'metadata:',
+      '  name: xprov-camp',
+      'spec:',
+      '  taskpack: .loopwright/taskpack.yaml',
+      '  targetCellId: cuda-sm90',
+      '  stages:',
+      '    mode: single-target',
+      '  population:',
+      '    islands: 1',
+      '    migrationIntervalGenerations: 4',
+      '    maxMigrationElites: 1',
+      '    nicheAxes:',
+      '      - id: bound_pipeline',
+      '        kind: enum',
+      '        values: [hbm, tensor_cube]',
+      '  sampling:',
+      '    noveltyDecayLambda: 1.0',
+      '    mutationWeights:',
+      '      diff_tune: 1.0',
+      '      full_rewrite: 0.0',
+      '      crossover: 0.0',
+      '    maxCrossoversPerPrompt: 1',
+      '  objectives:',
+      '    - metric: latency_us_p50',
+      '      direction: minimize',
+      '  budgets:',
+      '    maxGenerations: 1',
+      '    maxEvaluations: 1',
+      '    maxConcurrentEvaluations: 1',
+      '    scratchpadIntervalGenerations: 5',
+    ].join('\n');
+
+    const repoDir = join(root, 'repo');
+    const baseRevision = await initGitRepo(repoDir, {
+      '.loopwright/taskpack.yaml': { content: taskpackYaml },
+      '.loopwright/campaign.yaml': { content: campaignYaml },
+      'src/kernels/flash_decode.cu': { content: BASELINE_KERNEL_SOURCE },
+    });
+
+    process.env['ANTHROPIC_API_KEY'] = 'sk-anth-DO-NOT-LEAK-TO-OPENAI-0123456789';
+    process.env['OPENAI_API_KEY'] = 'sk-oai-EXPECTED-KEY-0123456789abcdef';
+    process.env['LOOPWRIGHT_MODELS_JSON'] = modelsJsonPath;
+    process.env['LOOPWRIGHT_ALLOW_MANIFEST_CUSTOM_BASE_URL'] = 'true';
+    process.env['LOOPWRIGHT_BENCHMARK_GATE_URL'] = `http://127.0.0.1:${ssePort}/bench`;
+    process.env['LOOPWRIGHT_GATE_SIGNING_SECRET'] = BENCH_HMAC_SECRET;
+
+    const manifest = parseEvolutionCampaignDocument(campaignYaml);
+    const taskpack = await loadDeclarativeTaskpack({
+      bytes: Buffer.from(taskpackYaml, 'utf8'),
+      format: 'yaml',
+      allowLoopbackHttp: true,
+    });
+
+    const coreScrubber = new SecretScrubber();
+    const taskpackScrubber = new TaskpackSecretScrubber();
+    const evaluator = createCliEvolutionEvaluator({
+      repositoryRoot: repoDir,
+      coreScrubber,
+      taskpackScrubber,
+    });
+
+    const campRoot = join(root, 'camp-state');
+    const childRunDir = join(campRoot, 'runs', 'ind-xprov-1');
+    await mkdir(childRunDir, { recursive: true, mode: 0o700 });
+
+    await evaluator({
+      campaignId: 'camp-xprov',
+      campaignRoot: campRoot,
+      childRunDir,
+      baseRevision,
+      individualId: 'ind-xprov-1',
+      islandId: 0,
+      generation: 1,
+      stagePhase: 'single-target',
+      bucketId: null,
+      heldOutWorkloadId: 'decode-bs1-4k',
+      teamConfigId: 'team-xprov-1',
+      modelId: 'claude-sonnet-4-6',
+      trackId: 'triton',
+      mutationKind: 'diff_tune',
+      parents: [],
+      stagedParentFiles: [],
+      manifest,
+      taskpack,
+      teamPatch: {
+        kind: 'TeamPatch',
+        schemaVersion: 'team-patch.v1',
+        diagnosis: {
+          summary: 'Switch single mutator role to openai/gpt-5.4',
+          plateauCategory: 'coupled_responsibilities',
+          rationale: 'Use openai provider even when bandit slot selected anthropic modelId',
+        },
+        roles: [
+          {
+            id: 'mutator-oai',
+            archetypeRoleId: 'mutator',
+            purpose: 'task',
+            tools: ['read', 'edit'],
+            model: 'openai/gpt-5.4',
+            prompt: 'Inspect kernel.',
+          },
+        ],
+        steps: [{ id: 'step-mut', roleId: 'mutator-oai', dependsOn: [] }],
+      },
+    });
+
+    assert.ok(observedOpenAiAuths.length >= 1, 'openai endpoint must receive the 1-role cross-provider request');
+    assert.ok(
+      observedOpenAiAuths.every(h => h === 'Bearer sk-oai-EXPECTED-KEY-0123456789abcdef'),
+      `expected OPENAI_API_KEY on openai endpoint, got ${JSON.stringify(observedOpenAiAuths)}`,
+    );
+    assert.ok(
+      observedOpenAiAuths.every(h => !h.includes('sk-anth-DO-NOT-LEAK')),
+      'ANTHROPIC_API_KEY must never be sent to openai endpoint',
+    );
+  } finally {
+    if (prevAnth === undefined) delete process.env['ANTHROPIC_API_KEY'];
+    else process.env['ANTHROPIC_API_KEY'] = prevAnth;
+    if (prevOai === undefined) delete process.env['OPENAI_API_KEY'];
+    else process.env['OPENAI_API_KEY'] = prevOai;
+    if (prevModelsJson === undefined) delete process.env['LOOPWRIGHT_MODELS_JSON'];
+    else process.env['LOOPWRIGHT_MODELS_JSON'] = prevModelsJson;
+    if (prevAllowCustomUrl === undefined) delete process.env['LOOPWRIGHT_ALLOW_MANIFEST_CUSTOM_BASE_URL'];
+    else process.env['LOOPWRIGHT_ALLOW_MANIFEST_CUSTOM_BASE_URL'] = prevAllowCustomUrl;
+    if (prevBenchUrl === undefined) delete process.env['LOOPWRIGHT_BENCHMARK_GATE_URL'];
+    else process.env['LOOPWRIGHT_BENCHMARK_GATE_URL'] = prevBenchUrl;
+    if (prevGateSecret === undefined) delete process.env['LOOPWRIGHT_GATE_SIGNING_SECRET'];
+    else process.env['LOOPWRIGHT_GATE_SIGNING_SECRET'] = prevGateSecret;
+    await new Promise<void>(resolveClose => sseServer.close(() => resolveClose()));
+    await rm(root, { recursive: true, force: true });
+  }
 });

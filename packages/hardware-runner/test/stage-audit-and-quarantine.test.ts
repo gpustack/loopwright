@@ -39,8 +39,8 @@ import {
   type WorkerJobSettlementSummary,
 } from '../src/index.js';
 
-const CONTROLLER_SECRET = 't6-controller-hmac-secret-0123456789abcdef';
-const WORKER_TOKEN = 't6-worker-bearer-secret-0123456789abcdef';
+const CONTROLLER_SECRET = 'stage-audit-hmac-secret-0123456789abcdef';
+const WORKER_TOKEN = 'stage-audit-worker-bearer-0123456789abcdef';
 
 function sha256Hex(data: Uint8Array | string): string {
   return createHash('sha256').update(data).digest('hex');
@@ -244,7 +244,7 @@ function buildTestElf64Binary(options: {
 
 function makeWorkerConfig(workDir: string, heldOutWorkloadsDir: string, overrides: Partial<WorkerConfig> = {}): WorkerConfig {
   return {
-    workerId: 'worker-t6-test',
+    workerId: 'worker-audit-test',
     relayUrl: 'http://127.0.0.1:19999',
     workerToken: WORKER_TOKEN,
     workDir,
@@ -271,11 +271,11 @@ function makeWorkerConfig(workDir: string, heldOutWorkloadsDir: string, override
 function makeLeaseGrant(overrides: Partial<LeaseGrant['job']> = {}): LeaseGrant {
   const digest = { algorithm: 'sha256' as const, hex: 'a'.repeat(64) };
   return {
-    relayBootId: 'boot-t6-01',
-    jobId: 'job-t6-01',
+    relayBootId: 'boot-audit-01',
+    jobId: 'job-audit-01',
     operationId: 'verify.0.check.decode-bench',
     leaseEpoch: 1,
-    leaseToken: 'LEASE_TOKEN_T6_SECRET_99887766',
+    leaseToken: 'LEASE_TOKEN_AUDIT_SECRET_99887766',
     leaseTtlMs: 30_000,
     job: {
       operationId: 'verify.0.check.decode-bench',
@@ -428,7 +428,7 @@ test('types & backward parity: legacy BenchmarkRequest and SignedBenchmarkVerdic
 });
 
 test('Stage A static symbol & spill audit: denies ELF64 (.so/.o/.cubin), PTX, and SASS cublasGemmEx / at::native:: / maxLocalSpillBytes: 0 with ZERO Stage B executions', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'lw-t6-stagea-audit-'));
+  const root = await mkdtemp(join(tmpdir(), 'lw-stagea-audit-'));
   try {
     const workDir = join(root, 'work');
     const workloadsDir = join(root, 'held_out_workloads');
@@ -837,7 +837,7 @@ test('Stage B 49,152-byte bucketMetrics + sanitized hardwareDiagnostics parser, 
   }
 
   // 3. End-to-end Relay + Worker round-trip of bucketMetrics + hardwareDiagnostics & all_buckets METRIC_THRESHOLD_FAILED
-  const root = await mkdtemp(join(tmpdir(), 'lw-t6-stageb-e2e-'));
+  const root = await mkdtemp(join(tmpdir(), 'lw-stageb-e2e-'));
   const casDir = join(root, 'cas');
   const workDir = join(root, 'work');
   const workloadsDir = join(root, 'workloads');
@@ -1241,7 +1241,7 @@ test('probeAcceleratorHealth: validates RTX 4090, RX 7800 XT low-power banner, a
 });
 
 test('worker.ts post-crash GPU quarantine: runs healthProbe after Stage B crash BEFORE :complete and throws WORKER_DEVICE_QUARANTINED before a second /v1/runner/leases:acquire', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'lw-t6-worker-quarantine-'));
+  const root = await mkdtemp(join(tmpdir(), 'lw-worker-quarantine-'));
   const casDir = join(root, 'cas');
   const workDir = join(root, 'work');
   const workloadsDir = join(root, 'workloads');

@@ -1843,9 +1843,23 @@ export async function exportEvolutionBundle(
   const anchorProvenance = verifiedPortfolioAnchor?.receipt.provenance ?? null;
   let resolvedAnchorProvenance: HardwareProvenance | null = anchorProvenance;
   const isSingleTarget = campaign.manifest.spec.stages.mode === 'single-target';
+  const expectedSingleTargetWorkloadId = isSingleTarget
+    ? (campaign.manifest.spec.stages.heldOutWorkloadId ?? campaign.manifest.spec.heldOutWorkloadId)
+    : undefined;
 
   for (const ind of selectedIndividuals) {
     const receiptBundle = await loadAndVerifyReceipt(ind);
+
+    if (
+      expectedSingleTargetWorkloadId !== undefined
+      && receiptBundle.heldOutWorkloadId !== undefined
+      && receiptBundle.heldOutWorkloadId !== expectedSingleTargetWorkloadId
+    ) {
+      throw new EvolutionError(
+        'EXPORT_UNVERIFIED_FORBIDDEN',
+        `receipt for individual "${ind.individualId}" has heldOutWorkloadId "${receiptBundle.heldOutWorkloadId}" (expected "${expectedSingleTargetWorkloadId}")`,
+      );
+    }
 
     if (resolvedAnchorProvenance === null) {
       resolvedAnchorProvenance = receiptBundle.provenance;

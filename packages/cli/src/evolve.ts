@@ -573,6 +573,8 @@ export function createCliEvolutionEvaluator(options: {
     ];
 
     const declaredModels = scopedTaskpack.spec.models ?? [];
+    const declaredRoles = scopedTaskpack.spec.roles ?? [];
+    const hasDeclaredRoles = declaredRoles.length > 0;
     const matchingModelIdx = declaredModels.findIndex(m => m.id === proposal.modelId);
     const selectedModelDecl = matchingModelIdx >= 0 ? declaredModels[matchingModelIdx] : declaredModels[0];
 
@@ -600,6 +602,32 @@ export function createCliEvolutionEvaluator(options: {
               env: process.env,
             })
           : undefined);
+      const byProvider: Record<string, string> = Object.create(null) as Record<string, string>;
+      for (const role of declaredRoles) {
+        const roleProvider = role.provider;
+        if (roleProvider === undefined || Object.hasOwn(byProvider, roleProvider)) continue;
+        if (
+          activeCandidate !== undefined
+          && activeCandidate.selection.provider === roleProvider
+          && activeCandidate.usesActiveTokenEnv
+        ) {
+          byProvider[roleProvider] = activeCandidate.providerEnvName;
+          continue;
+        }
+        const roleModelDecl = declaredModels.find(m => m.provider === roleProvider && m.id === role.model)
+          ?? declaredModels.find(m => m.provider === roleProvider);
+        const roleEnv = resolveDefaultProviderTokenEnv(roleProvider, {
+          modelsJsonApiKeyEnv: modelsConfig?.providers.get(roleProvider)?.apiKeyEnv,
+          manifestApiKeyEnv: roleModelDecl?.apiKeyEnv,
+          env: process.env,
+        });
+        if (roleEnv !== undefined) {
+          byProvider[roleProvider] = roleEnv;
+        }
+      }
+      const includeDefaultProviderEnv =
+        providerEnvName !== undefined
+        && (!hasDeclaredRoles || declaredRoles.every(r => r.provider === undefined || r.provider === providerForEnv));
       return {
         mode: 'candidate' as const,
         hostPolicy,
@@ -622,7 +650,8 @@ export function createCliEvolutionEvaluator(options: {
         gateEndpoints: activeGateEndpoints,
         publicationEndpoint: null,
         credentialEnvMap: {
-          ...(providerEnvName !== undefined ? { provider: providerEnvName } : {}),
+          ...(includeDefaultProviderEnv ? { provider: providerEnvName } : {}),
+          ...(Object.keys(byProvider).length > 0 ? { byProvider } : {}),
           gate: defaultBenchSecretEnv,
           localCommandGate: DEFAULT_LOCAL_COMMAND_GATE_ENV,
           ...(Object.keys(byCredentialRef).length > 0 ? { byCredentialRef } : {}),
@@ -637,9 +666,15 @@ export function createCliEvolutionEvaluator(options: {
       env: process.env,
       scrubber: taskpackScrubber,
     });
-    const activeCandidate = (matchingModelIdx >= 0
-      ? candidates.find(c => c.manifestIndex === matchingModelIdx)
-      : undefined) ?? candidates[0];
+    const singleDeclaredRole = declaredRoles.length === 1 ? declaredRoles[0] : undefined;
+    const activeCandidate = (singleDeclaredRole?.provider !== undefined
+      ? (candidates.find(c => c.selection.provider === singleDeclaredRole.provider && c.selection.model === singleDeclaredRole.model)
+        ?? candidates.find(c => c.selection.provider === singleDeclaredRole.provider))
+      : undefined)
+      ?? (matchingModelIdx >= 0
+        ? candidates.find(c => c.manifestIndex === matchingModelIdx)
+        : undefined)
+      ?? candidates[0];
 
     const ephemeralEnv: Record<string, string> = {};
     if (activeCandidate !== undefined && activeCandidate.usesActiveTokenEnv && activeCandidate.token !== undefined) {

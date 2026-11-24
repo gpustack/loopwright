@@ -40,7 +40,7 @@ const ARTIFACT_DIGEST = { algorithm: 'sha256' as const, hex: 'c'.repeat(64) };
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const base = await realpath(tmpdir());
-  const dir = await mkdtemp(join(base, 'lw-tp-evo-t8-'));
+  const dir = await mkdtemp(join(base, 'lw-tp-evo-'));
   try {
     await fn(dir);
   } finally {

@@ -719,7 +719,7 @@ export function parseEvolutionCampaignDocument(
 
   let topHeldOutWorkloadId: string | undefined;
   if (Object.hasOwn(specObj, 'heldOutWorkloadId') && specObj['heldOutWorkloadId'] !== undefined) {
-    topHeldOutWorkloadId = expectBucketId(specObj['heldOutWorkloadId'], '/spec/heldOutWorkloadId');
+    topHeldOutWorkloadId = expectIdentifier(specObj['heldOutWorkloadId'], '/spec/heldOutWorkloadId');
   }
 
   let tracks: readonly string[] | undefined;
@@ -757,14 +757,17 @@ export function parseEvolutionCampaignDocument(
       const singleStages = createNullRecord<{ mode: 'single-target'; heldOutWorkloadId?: string }>();
       singleStages.mode = 'single-target';
       if (Object.hasOwn(stagesObj, 'heldOutWorkloadId') && stagesObj['heldOutWorkloadId'] !== undefined) {
-        singleStages.heldOutWorkloadId = expectBucketId(stagesObj['heldOutWorkloadId'], '/spec/stages/heldOutWorkloadId');
+        singleStages.heldOutWorkloadId = expectIdentifier(stagesObj['heldOutWorkloadId'], '/spec/stages/heldOutWorkloadId');
       } else if (topHeldOutWorkloadId !== undefined) {
         singleStages.heldOutWorkloadId = topHeldOutWorkloadId;
       }
       stages = singleStages;
     } else {
-      if (Object.hasOwn(stagesObj, 'heldOutWorkloadId')) {
-        schemaInvalid('heldOutWorkloadId is not valid on specialist-then-portfolio stages', '/spec/stages/heldOutWorkloadId');
+      if (Object.hasOwn(stagesObj, 'heldOutWorkloadId') || topHeldOutWorkloadId !== undefined) {
+        schemaInvalid(
+          'heldOutWorkloadId is not valid on specialist-then-portfolio stages',
+          topHeldOutWorkloadId !== undefined ? '/spec/heldOutWorkloadId' : '/spec/stages/heldOutWorkloadId',
+        );
       }
       if (!Object.hasOwn(stagesObj, 'specialistBuckets') || !Object.hasOwn(stagesObj, 'portfolioHeldOutWorkloadId')) {
         schemaInvalid('specialist-then-portfolio requires specialistBuckets and portfolioHeldOutWorkloadId', '/spec/stages');
@@ -778,13 +781,13 @@ export function parseEvolutionCampaignDocument(
         const id = expectBucketId(bObj['id'], `${bPath}/id`);
         if (seenBucketIds.has(id)) schemaInvalid(`duplicate specialist bucket "${id}"`, `${bPath}/id`);
         seenBucketIds.add(id);
-        const heldOutWorkloadId = expectBucketId(bObj['heldOutWorkloadId'], `${bPath}/heldOutWorkloadId`);
+        const heldOutWorkloadId = expectIdentifier(bObj['heldOutWorkloadId'], `${bPath}/heldOutWorkloadId`);
         const bucketRec = createNullRecord<{ id: string; heldOutWorkloadId: string }>();
         bucketRec.id = id;
         bucketRec.heldOutWorkloadId = heldOutWorkloadId;
         specialistBuckets.push(bucketRec);
       }
-      const portfolioHeldOutWorkloadId = expectBucketId(
+      const portfolioHeldOutWorkloadId = expectIdentifier(
         stagesObj['portfolioHeldOutWorkloadId'],
         '/spec/stages/portfolioHeldOutWorkloadId',
       );

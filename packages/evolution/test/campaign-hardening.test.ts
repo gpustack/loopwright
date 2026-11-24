@@ -29,6 +29,7 @@ import {
   exportEvolutionBundle,
   inspectEvolutionCampaign,
   materializeGitCheckoutNoFollow,
+  parseEvolutionCampaignDocument,
   resumeEvolutionCampaign,
   runEvolutionCampaign,
   sanitizeRunId,
@@ -1236,6 +1237,153 @@ test('mid-generation SIGTERM resumes unfinished islands in same generation, eval
       () => collectChildBenchmarkArtifacts(artProtoDir, true),
       (err: unknown) => err instanceof EvolutionError && err.code === 'EVOLUTION_SCHEMA_INVALID',
     );
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('heldOutWorkloadId enforces strict identifier schema, forwards single-target override to evaluator, and gates bundle export', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'evo-hardening-workload-id-'));
+  try {
+    // 1. Invalid heldOutWorkloadId values (leading digit, uppercase, colon) fail closed at parse time
+    for (const badId of ['16x4096', 'Decode_BS16', 'bs16:fp16']) {
+      assert.throws(
+        () => parseEvolutionCampaignDocument(
+          BASE_CAMPAIGN_YAML.replace('targetCellId: cuda-h100-whole', `targetCellId: cuda-h100-whole\n  heldOutWorkloadId: "${badId}"`),
+        ),
+        (err: unknown) => err instanceof EvolutionError && err.code === 'EVOLUTION_SCHEMA_INVALID',
+      );
+      assert.throws(
+        () => parseEvolutionCampaignDocument(
+          BASE_CAMPAIGN_YAML.replace(
+            '  stages:\n    mode: single-target',
+            `  stages:\n    mode: specialist-then-portfolio\n    specialistBuckets:\n      - id: bs16:fp16\n        heldOutWorkloadId: valid-wl\n    portfolioHeldOutWorkloadId: "${badId}"`,
+          ),
+        ),
+        (err: unknown) => err instanceof EvolutionError && err.code === 'EVOLUTION_SCHEMA_INVALID',
+      );
+    }
+
+    // 2. Top-level spec.heldOutWorkloadId is rejected under specialist-then-portfolio mode
+    assert.throws(
+      () => parseEvolutionCampaignDocument(
+        BASE_CAMPAIGN_YAML
+          .replace('targetCellId: cuda-h100-whole', 'targetCellId: cuda-h100-whole\n  heldOutWorkloadId: single-override')
+          .replace(
+            '  stages:\n    mode: single-target',
+            '  stages:\n    mode: specialist-then-portfolio\n    specialistBuckets:\n      - id: bs16:fp16\n        heldOutWorkloadId: valid-wl\n    portfolioHeldOutWorkloadId: portfolio-wl',
+          ),
+      ),
+      (err: unknown) => err instanceof EvolutionError && err.code === 'EVOLUTION_SCHEMA_INVALID',
+    );
+
+    // 3. Bucket IDs with colons remain accepted while heldOutWorkloadId must be an identifier
+    const validPortfolio = parseEvolutionCampaignDocument(
+      BASE_CAMPAIGN_YAML.replace(
+        '  stages:\n    mode: single-target',
+        '  stages:\n    mode: specialist-then-portfolio\n    specialistBuckets:\n      - id: bs16:fp16\n        heldOutWorkloadId: valid-wl-1\n    portfolioHeldOutWorkloadId: portfolio-wl',
+      ),
+    );
+    assert.equal(validPortfolio.spec.stages.mode, 'specialist-then-portfolio');
+
+    // 4. single-target spec.heldOutWorkloadId override is forwarded to evaluator and enforced at export
+    const repoDir = join(tempDir, 'repo');
+    const baseRevision = initGitRepo(repoDir, {
+      '.loopwright/taskpack.yaml': { content: MULTI_CELL_TASKPACK_YAML },
+      'docs/role-guide.md': { content: '# Guide\n' },
+      'src/kernels/decode.cu': { content: KERNEL_SRC },
+    });
+
+    const singleOverrideYaml = BASE_CAMPAIGN_YAML
+      .replace('targetCellId: cuda-h100-whole', 'targetCellId: cuda-h100-whole\n  heldOutWorkloadId: full-sm90a-holdout')
+      .replace('islands: 2', 'islands: 1')
+      .replace('maxGenerations: 2', 'maxGenerations: 1')
+      .replace('maxEvaluations: 4', 'maxEvaluations: 1')
+      .replace('maxConcurrentEvaluations: 2', 'maxConcurrentEvaluations: 1');
+
+    const seenWorkloads: string[] = [];
+    const cubinBytes = buildMinimalElf64('decode_override_kernel');
+    const cubinDigest = { algorithm: 'sha256' as const, hex: sha256Hex(cubinBytes) };
+    const wrongWorkloadReceipt = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        kind: 'benchmark_verdict',
+        storeId: 'store-wl-override',
+        runId: 'run-wl-override',
+        lockHash: makeDigest('lock-wl'),
+        operationId: 'op-wrong-wl',
+        dispatchId: 'disp-wrong-wl',
+        dispatchGeneration: 1,
+        gateId: 'decode-cuda-bench',
+        checkId: 'gpu-bench-cuda',
+        candidateDigest: sha256Hex('cand-wl'),
+        status: 'approved',
+        reason: null,
+        expiresAtMs: '1900000000000',
+        preemptionCount: 0,
+        heldOutWorkloadId: 'cuda-default-workload',
+        metrics: { latency_us_p50: 32, goodput_rps: 2600 },
+        hardwareProvenance: {
+          targetCellId: 'cuda-h100-whole',
+          probeKind: 'physical',
+          vendor: 'nvidia',
+          deviceModel: 'NVIDIA H100 80GB HBM3',
+          accelerator: 'sm_90a',
+          isolationMode: 'whole_device',
+          deviceCount: 1,
+          driverVersion: '555.42.02',
+          runtimeVersion: 'cuda-12.5',
+          topology: 'single_gpu',
+          workloadDigest: makeDigest('wl-wrong'),
+          clockLockMode: 'locked',
+        },
+        outputArtifacts: [
+          {
+            name: 'decode.cubin',
+            digest: cubinDigest,
+            byteLength: cubinBytes.byteLength,
+            mediaType: 'application/octet-stream',
+          },
+        ],
+        signature: '0'.repeat(64),
+      }),
+      'utf8',
+    );
+
+    const res = await runEvolutionCampaign({
+      campaignRoot: join(tempDir, 'camp-wl-override'),
+      campaignId: 'camp-wl-override',
+      manifest: singleOverrideYaml,
+      repositoryRoot: repoDir,
+      baseRevision,
+      evaluator: async proposal => {
+        seenWorkloads.push(proposal.heldOutWorkloadId);
+        return {
+          status: 'passed',
+          codeSlice: '// EVOLVE-BLOCK-START: decode\nint decode_kernel() { return 42; }\n// EVOLVE-BLOCK-END: decode\n',
+          metrics: { latency_us_p50: 32, goodput_rps: 2600 },
+          evidenceDigest: makeDigest('ev-wl-override'),
+          rawVerdictReceiptBytes: wrongWorkloadReceipt,
+          stageABlobs: [{ name: 'decode.cubin', bytes: cubinBytes, digest: cubinDigest, byteLength: cubinBytes.byteLength }],
+          outputArtifacts: [{ name: 'decode.cubin', digest: cubinDigest, byteLength: cubinBytes.byteLength, uri: `cas://sha256/${cubinDigest.hex}` }],
+        };
+      },
+    });
+    assert.deepEqual(seenWorkloads, ['full-sm90a-holdout']);
+
+    await assert.rejects(
+      () => exportEvolutionBundle({
+        store: res.store,
+        campaignId: 'camp-wl-override',
+        outputDir: join(tempDir, 'out-wrong-wl'),
+        allowUnverifiedSignature: true,
+      }),
+      (err: unknown) =>
+        err instanceof EvolutionError
+        && err.code === 'EXPORT_UNVERIFIED_FORBIDDEN'
+        && /expected "full-sm90a-holdout"/.test(err.message),
+    );
+    await res.store.close();
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

@@ -365,6 +365,7 @@ export interface RunEvolutionCampaignOptions {
   readonly clock?: CampaignClockSource | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly autoExport?: boolean | undefined;
+  readonly exportFormat?: 'dir' | 'oci-layout' | undefined;
   readonly allowSyntheticProbe?: boolean | undefined;
   readonly receiptSigningSecret?: string | undefined;
   readonly verifyReceiptSignature?: ReceiptSignatureVerifier | undefined;
@@ -388,6 +389,7 @@ export interface ResumeEvolutionCampaignOptions {
   readonly clock?: CampaignClockSource | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly autoExport?: boolean | undefined;
+  readonly exportFormat?: 'dir' | 'oci-layout' | undefined;
   readonly allowSyntheticProbe?: boolean | undefined;
   readonly receiptSigningSecret?: string | undefined;
   readonly verifyReceiptSignature?: ReceiptSignatureVerifier | undefined;
@@ -2083,6 +2085,7 @@ interface InternalDriverOptions {
   readonly environment?: ((name: string) => string | undefined) | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly autoExport: boolean;
+  readonly exportFormat?: 'dir' | 'oci-layout' | undefined;
   readonly allowSyntheticProbe: boolean;
   readonly receiptSigningSecret?: string | undefined;
   readonly verifyReceiptSignature?: ReceiptSignatureVerifier | undefined;
@@ -2874,11 +2877,15 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
 
   const currentCampaign = (await store.getCampaign(campaignId))!;
   if (manifest.spec.stages.mode === 'single-target') {
+    const singleTargetWorkloadId =
+      manifest.spec.stages.heldOutWorkloadId
+      ?? manifest.spec.heldOutWorkloadId
+      ?? defaultHeldOutWorkloadId;
     const startGen = Math.max(1, currentCampaign.currentGeneration + 1);
     const outcome = await runStageGenerations({
       stagePhase: 'single-target',
       bucketId: null,
-      heldOutWorkloadId: defaultHeldOutWorkloadId,
+      heldOutWorkloadId: singleTargetWorkloadId,
       startGen,
       maxGenInclusive: budgets.maxGenerations,
       maxEvalsCeiling: budgets.maxEvaluations,
@@ -3142,7 +3149,7 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
       store,
       campaignId,
       outputDir: resolvedOutDir,
-      format: manifest.spec.export.format,
+      format: opts.exportFormat ?? manifest.spec.export.format,
       allowSyntheticProbe: opts.allowSyntheticProbe,
       ...(effectiveDriverConstraint !== undefined ? { driverConstraint: effectiveDriverConstraint } : {}),
       ...(opts.receiptSigningSecret !== undefined ? { receiptSigningSecret: opts.receiptSigningSecret } : {}),
@@ -3277,6 +3284,7 @@ export async function runEvolutionCampaign(
           : {})),
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
       autoExport: options.autoExport ?? true,
+      ...(options.exportFormat !== undefined ? { exportFormat: options.exportFormat } : {}),
       allowSyntheticProbe: options.allowSyntheticProbe === true,
       ...(options.receiptSigningSecret !== undefined ? { receiptSigningSecret: options.receiptSigningSecret } : {}),
       ...(options.verifyReceiptSignature !== undefined ? { verifyReceiptSignature: options.verifyReceiptSignature } : {}),
@@ -3395,6 +3403,7 @@ export async function resumeEvolutionCampaign(
           : {})),
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
       autoExport: options.autoExport ?? true,
+      ...(options.exportFormat !== undefined ? { exportFormat: options.exportFormat } : {}),
       allowSyntheticProbe: options.allowSyntheticProbe === true,
       ...(options.receiptSigningSecret !== undefined ? { receiptSigningSecret: options.receiptSigningSecret } : {}),
       ...(options.verifyReceiptSignature !== undefined ? { verifyReceiptSignature: options.verifyReceiptSignature } : {}),
