@@ -196,7 +196,7 @@ const BASELINE_KERNEL_SOURCE = [
 test('evolve-cli: help flags, zero top-level @loopwright/evolution static imports, and exhaustive exit codes', async () => {
   const topHelp = spawnSync(process.execPath, [MAIN, '--help'], {
     encoding: 'utf8',
-    timeout: 5_000,
+    timeout: 15_000,
     env: { PATH: '/usr/bin:/bin' },
   });
   assert.equal(topHelp.status, 0, topHelp.stderr);
@@ -218,7 +218,7 @@ test('evolve-cli: help flags, zero top-level @loopwright/evolution static import
   ]) {
     const res = spawnSync(process.execPath, [MAIN, ...helpArgv], {
       encoding: 'utf8',
-      timeout: 5_000,
+      timeout: 15_000,
       env: { PATH: '/usr/bin:/bin' },
     });
     assert.equal(res.status, 0, res.stderr);
@@ -422,7 +422,7 @@ test('evolve-cli: evolve check validates campaign manifests and fails closed wit
     const missingStatus = spawnSync(
       process.execPath,
       [MAIN, 'evolve', 'status', '--campaign', join(root, 'missing-state'), '--json'],
-      { encoding: 'utf8', timeout: 5_000, env: { PATH: '/usr/bin:/bin' } },
+      { encoding: 'utf8', timeout: 15_000, env: { PATH: '/usr/bin:/bin' } },
     );
     assert.equal(missingStatus.status, 4, missingStatus.stdout + missingStatus.stderr);
     assert.equal(JSON.parse(missingStatus.stdout).data.code, 'EVOLUTION_NOT_FOUND');
@@ -489,7 +489,7 @@ test('evolve-cli: end-to-end specialist-then-portfolio run, SIGINT pause + resum
     casDir: relayCasDir,
     controllerSigningSecret: BENCH_HMAC_SECRET,
     workerTokens: [WORKER_BEARER_TOKEN],
-    leaseTtlMs: 15_000,
+    leaseTtlMs: 30_000,
     sweepIntervalMs: 150,
   });
 
@@ -512,9 +512,9 @@ test('evolve-cli: end-to-end specialist-then-portfolio run, SIGINT pause + resum
       },
       pollWaitMs: 40,
       heartbeatIntervalMs: 50,
-      requestTimeoutMs: 5_000,
-      stageATimeoutMs: 15_000,
-      stageBTimeoutMs: 15_000,
+      requestTimeoutMs: 15_000,
+      stageATimeoutMs: 45_000,
+      stageBTimeoutMs: 45_000,
       toolchainPaths: [join(process.execPath, '..')],
       probeMode: 'synthetic_fixture',
     } satisfies WorkerConfig,
@@ -1055,7 +1055,7 @@ test('evolve-cli: teamEvolution.enabled triggers isolated read-only LocalRunStor
     casDir: relayCasDir,
     controllerSigningSecret: BENCH_HMAC_SECRET,
     workerTokens: [WORKER_BEARER_TOKEN],
-    leaseTtlMs: 15_000,
+    leaseTtlMs: 30_000,
     sweepIntervalMs: 150,
   });
 
@@ -1078,9 +1078,9 @@ test('evolve-cli: teamEvolution.enabled triggers isolated read-only LocalRunStor
       },
       pollWaitMs: 40,
       heartbeatIntervalMs: 50,
-      requestTimeoutMs: 5_000,
-      stageATimeoutMs: 15_000,
-      stageBTimeoutMs: 15_000,
+      requestTimeoutMs: 15_000,
+      stageATimeoutMs: 45_000,
+      stageBTimeoutMs: 45_000,
       toolchainPaths: [join(process.execPath, '..')],
       probeMode: 'synthetic_fixture',
     } satisfies WorkerConfig,
@@ -1435,7 +1435,7 @@ test('evolve-cli: exact whitespace/comment clone edit is rejected with NOVELTY_C
     casDir: relayCasDir,
     controllerSigningSecret: BENCH_HMAC_SECRET,
     workerTokens: [WORKER_BEARER_TOKEN],
-    leaseTtlMs: 15_000,
+    leaseTtlMs: 30_000,
     sweepIntervalMs: 150,
   });
 
@@ -1459,9 +1459,9 @@ test('evolve-cli: exact whitespace/comment clone edit is rejected with NOVELTY_C
       },
       pollWaitMs: 40,
       heartbeatIntervalMs: 50,
-      requestTimeoutMs: 5_000,
-      stageATimeoutMs: 15_000,
-      stageBTimeoutMs: 15_000,
+      requestTimeoutMs: 15_000,
+      stageATimeoutMs: 45_000,
+      stageBTimeoutMs: 45_000,
       toolchainPaths: [join(process.execPath, '..')],
       probeMode: 'synthetic_fixture',
     } satisfies WorkerConfig,

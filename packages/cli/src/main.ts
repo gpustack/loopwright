@@ -1848,7 +1848,7 @@ async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> 
 }
 
 function scrubJsonPayload(value: unknown, scrubber: SecretScrubber, depth = 0): unknown {
-  if (depth > 32) return value;
+  if (depth > 32) return '[REDACTED:DEPTH]';
   if (typeof value === 'string') return scrubber.scrub(value);
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {

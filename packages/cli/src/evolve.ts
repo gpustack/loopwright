@@ -87,34 +87,24 @@ async function writeCompiledEvolutionDir(
     readonly digest: Digest;
   }> = [];
 
-  if (proposal.stagedParentFiles.length > 0) {
-    const parentResDir = join(registryDirectory, '.loopwright-evo', 'parents');
-    await mkdir(parentResDir, { recursive: true, mode: 0o700 });
-    for (let i = 0; i < proposal.stagedParentFiles.length; i += 1) {
-      const pf = proposal.stagedParentFiles[i]!;
-      const relPath = `.loopwright-evo/parents/parent-${i}.json`;
-      const dstPath = join(registryDirectory, relPath);
-      const bytes = await readFile(pf.filePath);
-      if (scrubber.containsSecret(bytes.toString('utf8'))) {
-        throw new evolution.EvolutionError(
-          'SECRET_LEAK_DETECTED',
-          `staged evolution parent context "${relPath}" contained a registered secret and was refused`,
-        );
-      }
-      await writeFile(dstPath, bytes, { mode: 0o400 });
-      await chmod(dstPath, 0o400);
-      extraResources.push({
-        id: `evo-parent-${i}`,
-        kind: 'document',
-        path: relPath,
-        digest: pf.digest,
-      });
+  // Read and secret-check all staged parent and scratchpad bytes before writing anything to
+  // registryDirectory so a SECRET_LEAK_DETECTED refusal never leaves partial files on disk.
+  const stagedParentsToWrite: Array<{ readonly relPath: string; readonly bytes: Buffer; readonly digest: Digest }> = [];
+  for (let i = 0; i < proposal.stagedParentFiles.length; i += 1) {
+    const pf = proposal.stagedParentFiles[i]!;
+    const relPath = `.loopwright-evo/parents/parent-${i}.json`;
+    const bytes = await readFile(pf.filePath);
+    if (scrubber.containsSecret(bytes.toString('utf8'))) {
+      throw new evolution.EvolutionError(
+        'SECRET_LEAK_DETECTED',
+        `staged evolution parent context "${relPath}" contained a registered secret and was refused`,
+      );
     }
+    stagedParentsToWrite.push({ relPath, bytes, digest: pf.digest });
   }
 
+  let stagedScratchpadToWrite: { readonly relPath: string; readonly bytes: Buffer; readonly digest: Digest } | null = null;
   if (proposal.stagedScratchpadPath !== undefined) {
-    const scDir = join(registryDirectory, '.loopwright-evo', 'scratchpad');
-    await mkdir(scDir, { recursive: true, mode: 0o700 });
     const scBytes = await readFile(proposal.stagedScratchpadPath);
     if (scrubber.containsSecret(scBytes.toString('utf8'))) {
       throw new evolution.EvolutionError(
@@ -122,15 +112,41 @@ async function writeCompiledEvolutionDir(
         'staged evolution scratchpad contained a registered secret and was refused',
       );
     }
-    const relPath = '.loopwright-evo/scratchpad/latest.md';
-    const dstPath = join(registryDirectory, relPath);
-    await writeFile(dstPath, scBytes, { mode: 0o400 });
+    stagedScratchpadToWrite = {
+      relPath: '.loopwright-evo/scratchpad/latest.md',
+      bytes: scBytes,
+      digest: evolution.sha256Digest(scBytes),
+    };
+  }
+
+  if (stagedParentsToWrite.length > 0) {
+    const parentResDir = join(registryDirectory, '.loopwright-evo', 'parents');
+    await mkdir(parentResDir, { recursive: true, mode: 0o700 });
+    for (let i = 0; i < stagedParentsToWrite.length; i += 1) {
+      const item = stagedParentsToWrite[i]!;
+      const dstPath = join(registryDirectory, item.relPath);
+      await writeFile(dstPath, item.bytes, { mode: 0o400 });
+      await chmod(dstPath, 0o400);
+      extraResources.push({
+        id: `evo-parent-${i}`,
+        kind: 'document',
+        path: item.relPath,
+        digest: item.digest,
+      });
+    }
+  }
+
+  if (stagedScratchpadToWrite !== null) {
+    const scDir = join(registryDirectory, '.loopwright-evo', 'scratchpad');
+    await mkdir(scDir, { recursive: true, mode: 0o700 });
+    const dstPath = join(registryDirectory, stagedScratchpadToWrite.relPath);
+    await writeFile(dstPath, stagedScratchpadToWrite.bytes, { mode: 0o400 });
     await chmod(dstPath, 0o400);
     extraResources.push({
       id: 'evo-scratchpad',
       kind: 'document',
-      path: relPath,
-      digest: evolution.sha256Digest(scBytes),
+      path: stagedScratchpadToWrite.relPath,
+      digest: stagedScratchpadToWrite.digest,
     });
   }
 
@@ -743,9 +759,9 @@ export function createCliEvolutionEvaluator(options: {
       const evolveGuardDecl = scopedTaskpack.spec.verification.localChecks.find(
         c => c.implementation === 'evolve-block-guard.v1',
       );
-      const rawGuardedFiles = evolveGuardDecl?.parameters?.['files'];
       let guardedFiles: readonly string[] = [];
-      if (rawGuardedFiles !== undefined) {
+      if (evolveGuardDecl !== undefined) {
+        const rawGuardedFiles = evolveGuardDecl.parameters?.['files'];
         if (
           !Array.isArray(rawGuardedFiles)
           || rawGuardedFiles.length === 0
