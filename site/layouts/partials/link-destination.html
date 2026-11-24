@@ -3,8 +3,10 @@
 {{- $siteHost := lower (default "docs.gpustack.ai" $.page.Site.Params.siteHost) -}}
 {{- $repoSlug := default "gpustack/loopwright" $.page.Site.Params.repoSlug -}}
 {{- $repoName := path.Base $repoSlug -}}
-{{- $excludedPathPattern := printf `^(?:%s/(?:[^/]+/)?)?(?:references|docs/references|contribute|docs/contribute|docs/adr|development\.md|docs/development(?:\.md)?)(?:/|$)` $repoName -}}
-{{- $ghExcludedPattern := printf `^%s/(?:blob|tree)/[^/]+/docs/(?:references|contribute|adr|development(?:\.md)?)(?:/|$)` $repoSlug -}}
+{{- $repoNameEsc := replaceRE `([.+*?^$()\[\]{}|\\])` `\$1` $repoName -}}
+{{- $repoSlugEsc := replaceRE `([.+*?^$()\[\]{}|\\])` `\$1` $repoSlug -}}
+{{- $excludedPathPattern := printf `^(?:%s/(?:[^/]+/)?)?(?:references|docs/references|contribute|docs/contribute|docs/adr|development\.md|docs/development(?:\.md)?)(?:/|$)` $repoNameEsc -}}
+{{- $ghExcludedPattern := printf `^%s/(?:blob|tree)/[^/]+/docs/(?:references|contribute|adr|development(?:\.md)?)(?:/|$)` $repoSlugEsc -}}
 {{- if $url.Host -}}
   {{- $host := lower $url.Host -}}
   {{- $scheme := lower $url.Scheme -}}

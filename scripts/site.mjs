@@ -1205,12 +1205,35 @@ function decodeXmlEntities(text) {
     .replace(/&apos;/g, "'");
 }
 
+function readSiteHugoParams(rootDir) {
+  const params = {
+    siteHost: "docs.gpustack.ai",
+    repoSlug: "gpustack/loopwright",
+    repoNavLabel: "Repository navigation",
+    repoNavDescription: "Module relationships, design records, code entry points and applicable skills for contributors."
+  };
+  const hugoConfigPath = path.join(rootDir, "site", "hugo.toml");
+  if (!fs.existsSync(hugoConfigPath)) {
+    return params;
+  }
+  const text = fs.readFileSync(hugoConfigPath, "utf8");
+  for (const key of Object.keys(params)) {
+    const match = text.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, "m"));
+    if (match?.[1]) {
+      params[key] = match[1];
+    }
+  }
+  return params;
+}
+
 export function verifySite(rootDir = process.cwd(), options = {}) {
   const root = path.resolve(rootDir);
   const publicDir = path.resolve(options.publicDir || path.join(root, "site", "public"));
   const docsDir = path.resolve(options.docsDir || path.join(root, "docs"));
   const indexFile = path.join(docsDir, "README.md");
-  const repoBlobBase = validateNonEmpty(options.repoBlobBase || DEFAULT_REPO_BLOB_BASE, "repoBlobBase", { stripSlash: true });
+  const hugoParams = readSiteHugoParams(root);
+  const derivedRepoBlobBase = `https://github.com/${hugoParams.repoSlug}/blob`;
+  const repoBlobBase = validateNonEmpty(options.repoBlobBase || derivedRepoBlobBase, "repoBlobBase", { stripSlash: true });
   const errors = [];
 
   const rawBaseUrl = String(options.baseURL || process.env.SITE_BASE_URL || "/").trim();
@@ -1456,21 +1479,11 @@ export function verifySite(rootDir = process.cwd(), options = {}) {
   }
 
   const expectedOptionalMap = new Map();
-  let repoNavLabel = "Repository navigation";
-  let repoNavDesc = "Module relationships, design records, code entry points and applicable skills for contributors.";
-  const hugoConfigPath = path.join(root, "site", "hugo.toml");
-  if (fs.existsSync(hugoConfigPath)) {
-    const hugoConfigText = fs.readFileSync(hugoConfigPath, "utf8");
-    const labelMatch = hugoConfigText.match(/^\s*repoNavLabel\s*=\s*"([^"]+)"/m);
-    const descMatch = hugoConfigText.match(/^\s*repoNavDescription\s*=\s*"([^"]+)"/m);
-    if (labelMatch?.[1]) repoNavLabel = labelMatch[1];
-    if (descMatch?.[1]) repoNavDesc = descMatch[1];
-  }
   const repoNavUrl = `${repoBlobBase}/${effectiveSourceRef}/docs/README.md`;
   expectedOptionalMap.set(repoNavUrl, {
-    label: repoNavLabel,
+    label: hugoParams.repoNavLabel,
     url: repoNavUrl,
-    desc: repoNavDesc
+    desc: hugoParams.repoNavDescription
   });
 
   const indexedContributeTargets = new Set();

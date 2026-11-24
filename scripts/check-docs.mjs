@@ -74,6 +74,7 @@ const IRREGULAR_KIND_SINGULARS = new Map([
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const BQ_FENCE = /^(?: {0,3}> ?)* {0,3}(`{3,}|~{3,})(.*)$/;
+const BQ_HEADING_RE = /^(?: {0,3}> ?)* {0,3}#{1,6}\s+(.+)$/;
 const EXCLUDED_SITE_ROUTE_RE =
   /^(?:loopwright\/(?:[^/]+\/)?)?(references|docs\/references|contribute|docs\/contribute|docs\/adr|development(?:\.md)?|docs\/development(?:\.md)?)(?:\/|$)/i;
 const GITHUB_EXCLUDED_BLOB_RE =
@@ -181,7 +182,7 @@ export function getAnchors(filePath) {
       continue;
     }
 
-    const headingMatch = line.match(/^(?: {0,3}> ?)* {0,3}#{1,6}\s+(.+)$/);
+    const headingMatch = line.match(BQ_HEADING_RE);
     if (headingMatch) {
       const rawText = headingMatch[1]
         .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
@@ -385,7 +386,7 @@ export function checkInterrogatives(filePath, content, errors) {
       continue;
     }
 
-    const headingMatch = line.match(/^(?: {0,3}> ?)* {0,3}#{1,6}\s+(.+)$/);
+    const headingMatch = line.match(BQ_HEADING_RE);
     if (headingMatch) {
       const text = headingMatch[1];
       if (INTERROGATIVES.test(text)) {
